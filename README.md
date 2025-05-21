@@ -2,6 +2,8 @@
 
 Volt is a novel decentralized protocol enabling instant, feeless, and privacy-preserving asset transfers without a global blockchain ledger. Leveraging Sparse Merkle Trees (SMTs) for cryptographic proofs and Distributed Hash Tables (DHTs) for peer-to-peer data storage and retrieval, Volt reduces network overhead, eliminates transaction fees, and enhances user privacy.
 
+**Website:** [https://voltnetwork.com](https://voltnetwork.com)
+
 This architecture provides stateless verification and scalability while maintaining robust security and data integrity guarantees.
 
 Currently, Volt is under active development and in Beta phase. We are actively seeking early adopters and contributors to help shape the future of Volt.
@@ -115,3 +117,7 @@ Note: Only the token issuer can mint new tokens.
 ```bash
 ./target/release/cli burn-token --token-id 1 --amount 500
 ```
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
