@@ -1,0 +1,21 @@
+[package]
+name = "bridge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Ethereum bridge for the chainless token transfer network"
+license.workspace = true
+
+[dependencies]
+core = { path = "../core" }
+ethers = { version = "2.0.4", features = ["abigen", "legacy", "ws"] }
+tokio.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+log.workspace = true
+hex.workspace = true
+serde_json = "1.0.96"
+
+[dev-dependencies]
+tempfile.workspace = true

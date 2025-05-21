@@ -1,0 +1,26 @@
+[package]
+name = "network"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Network layer for the chainless token transfer network"
+license.workspace = true
+
+[dependencies]
+core = { path = "../core" }
+libp2p = { version = "0.52", features = ["kad", "gossipsub", "dns", "tcp", "tokio", "noise", "yamux", "identify", "ping", "macros"] }
+serde = { workspace = true }
+serde_arrays = "0.1.0"
+bincode = { workspace = true }
+rocksdb = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+serial_test.workspace = true

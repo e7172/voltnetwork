@@ -1,0 +1,21 @@
+[package]
+name = "tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Integration tests for the chainless token transfer network"
+license.workspace = true
+
+[dependencies]
+core = { path = "../core" }
+network = { path = "../network" }
+node = { path = "../node" }
+cli = { path = "../cli" }
+bridge = { path = "../bridge" }
+tokio.workspace = true
+anyhow.workspace = true
+tempfile.workspace = true
+serial_test.workspace = true
+rand.workspace = true
+ethers.workspace = true
+futures.workspace = true
