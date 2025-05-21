@@ -470,7 +470,7 @@ pub async fn handle_update(
     }
 
     // Verify the signature
-    // TODO: Implement signature verification
+    verify_signature(&update)?;
 
     // Update the SMT
     {
@@ -507,4 +507,52 @@ pub async fn handle_update(
     metrics::TRANSACTION_COUNTER.inc();
 
     Ok(())
+}
+
+/// Verifies the signature in an update message.
+///
+/// This function checks that the signature in the update message was created by the owner of the
+/// `from` address. In this system, addresses are derived from public keys, so we can extract
+/// the public key from the address and use it to verify the signature.
+fn verify_signature(update: &UpdateMsg) -> Result<(), NodeError> {
+    use ed25519_dalek::{PublicKey, Signature, Verifier};
+    
+    // Extract the public key from the from address
+    // In our system, the address is derived directly from the public key
+    let mut public_key_bytes = [0u8; 32];
+    public_key_bytes.copy_from_slice(&update.from);
+    
+    // Create the public key from the bytes
+    let public_key = match PublicKey::from_bytes(&public_key_bytes) {
+        Ok(pk) => pk,
+        Err(e) => return Err(NodeError::InvalidSignature(format!("Invalid public key: {}", e))),
+    };
+    
+    // Convert the core::types::Signature to ed25519_dalek::Signature
+    let signature_bytes = update.signature.0;
+    let signature = match Signature::from_bytes(&signature_bytes) {
+        Ok(sig) => sig,
+        Err(e) => return Err(NodeError::InvalidSignature(format!("Invalid signature format: {}", e))),
+    };
+    
+    // Create the message to verify
+    // The message should contain all the data that was signed
+    let mut message = Vec::new();
+    message.extend_from_slice(&update.from);
+    message.extend_from_slice(&update.to);
+    
+    // Add amount as bytes (little-endian)
+    message.extend_from_slice(&update.amount.to_le_bytes());
+    
+    // Add nonce as bytes (little-endian)
+    message.extend_from_slice(&update.nonce.to_le_bytes());
+    
+    // Add root hash
+    message.extend_from_slice(&update.root);
+    
+    // Verify the signature
+    match public_key.verify(&message, &signature) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(NodeError::InvalidSignature(format!("Signature verification failed: {}", e))),
+    }
 }
