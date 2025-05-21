@@ -2,7 +2,7 @@
 
 Volt is a novel decentralized protocol enabling instant, feeless, and privacy-preserving asset transfers without a global blockchain ledger. Leveraging Sparse Merkle Trees (SMTs) for cryptographic proofs and Distributed Hash Tables (DHTs) for peer-to-peer data storage and retrieval, Volt reduces network overhead, eliminates transaction fees, and enhances user privacy.
 
-**Website:** [https://voltnetwork.com](https://voltnetwork.com)
+**Website:** [https://voltnetwork.org](https://voltnetwork.org)
 
 This architecture provides stateless verification and scalability while maintaining robust security and data integrity guarantees.
 
