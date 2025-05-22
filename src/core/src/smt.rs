@@ -98,6 +98,8 @@ impl Clone for SMT {
         
         // Copy the next token ID and native token ID
         smt.next_token_id = self.next_token_id;
+        
+        // Note: We don't clone the DB reference as it's not needed for most operations
         smt.native_token_id = self.native_token_id;
 
         // Copy the token registry
@@ -392,6 +394,16 @@ impl SMT {
     /// Returns the root hash of the tree.
     pub fn root(&self) -> [u8; 32] {
         self.root
+    }
+    
+    /// Returns a reference to the RocksDB instance, if available.
+    /// This is useful for ensuring state persistence in production environments.
+    ///
+    /// # Returns
+    ///
+    /// `Some(&Arc<DB>)` if a database is configured, `None` otherwise
+    pub fn get_db(&self) -> Option<&Arc<DB>> {
+        self.db.as_ref()
     }
 
     /// Updates an account leaf in the tree.
