@@ -86,7 +86,7 @@ Get help:
 
 ./target/release/cli balance
 
-request-tokens --amount 1000
+./target/release/cli request-tokens --amount 1000
 
 ./target/release/cli issue-token --metadata A,A,A
 
@@ -127,3 +127,24 @@ Note: Only the token issuer can mint new tokens.
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+# Build the project
+
+cargo build --release
+
+# Start nodes
+
+RUST_LOG=debug cargo run --bin cli -- mint-token --token-id 4 --to dcc80a50e84955049514913bd424ce6cbdff2bca048c612ab9eecbc7d703fa7e --amount 100
+
+RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node1 --rpc-addr 127.0.0.1:8545 --listen /ip4/0.0.0.0/tcp/30333
+RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node2 --rpc-addr 127.0.0.1:8546 --listen /ip4/0.0.0.0/tcp/30334 --bootstrap /ip4/127.0.0.1/tcp/30333
+
+# Check balances
+
+./target/release/cli --node http://127.0.0.1:8545 balance
+./target/release/cli --node http://127.0.0.1:8547 balance
+./target/release/cli --node http://127.0.0.1:8546 balance
+
+# Make transactions
+
+./target/release/cli --node http://127.0.0.1:8545 send --to 0xdcc80a50e84955049514913bd424ce6cbdff2bca048c612ab9eecbc7d703fa7e --amount 25

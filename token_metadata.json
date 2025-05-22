@@ -1,0 +1,6 @@
+{
+   "name": "Test Token",
+   "symbol": "TEST",
+   "decimals": 18,
+   "max_supply": 1000000
+}

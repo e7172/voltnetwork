@@ -868,44 +868,202 @@ fn handle_mint_token(
         return Err(err);
     }
 
-    let message_hex = params[0].as_str().ok_or_else(|| {
+    // Accept either a hex string or a JSON object
+    let message: core::types::SystemMsg = if let Some(message_hex) = params[0].as_str() {
+        // Parse the message from hex string
+        info!("Received message hex: {}", message_hex);
+        
+        let message_bytes = match hex::decode(message_hex) {
+            Ok(bytes) => {
+                info!("Decoded message bytes: {:?}", bytes);
+                bytes
+            },
+            Err(e) => {
+                let err = JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid message hex: {}", e),
+                    data: Some(serde_json::to_value(e.to_string()).unwrap()),
+                };
+                error!("p3p_mintToken error: {:?}", err);
+                return Err(err);
+            }
+        };
+
+        match bincode::deserialize(&message_bytes) {
+            Ok(msg) => {
+                info!("Successfully deserialized message: {:?}", msg);
+                msg
+            },
+            Err(e) => {
+                let err = JsonRpcError {
+                    code: -32602,
+                    message: format!("Failed to deserialize message: {}", e),
+                    data: Some(serde_json::to_value(e.to_string()).unwrap()),
+                };
+                error!("p3p_mintToken error: {:?}", err);
+                return Err(err);
+            }
+        }
+    } else if let Some(obj) = params[0].as_object() {
+        // Parse the message from JSON object
+        info!("Received message as JSON object: {:?}", obj);
+        
+        // Extract fields from the JSON object
+        let from_hex = obj.get("from").and_then(|v| v.as_str()).ok_or_else(|| {
+            let err = JsonRpcError {
+                code: -32602,
+                message: "Missing 'from' field".to_string(),
+                data: None,
+            };
+            error!("p3p_mintToken error: {:?}", err);
+            err
+        })?;
+        
+        let to_hex = obj.get("to").and_then(|v| v.as_str()).ok_or_else(|| {
+            let err = JsonRpcError {
+                code: -32602,
+                message: "Missing 'to' field".to_string(),
+                data: None,
+            };
+            error!("p3p_mintToken error: {:?}", err);
+            err
+        })?;
+        
+        let token_id = obj.get("token_id").and_then(|v| v.as_u64()).ok_or_else(|| {
+            let err = JsonRpcError {
+                code: -32602,
+                message: "Missing or invalid 'token_id' field".to_string(),
+                data: None,
+            };
+            error!("p3p_mintToken error: {:?}", err);
+            err
+        })?;
+        
+        let amount_str = obj.get("amount").and_then(|v| v.as_str());
+        let amount_num = obj.get("amount").and_then(|v| v.as_u64());
+        
+        let amount: u128 = if let Some(amount_str) = amount_str {
+            match amount_str.parse::<u128>() {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    let err = JsonRpcError {
+                        code: -32602,
+                        message: format!("Invalid amount string: {}", e),
+                        data: None,
+                    };
+                    error!("p3p_mintToken error: {:?}", err);
+                    return Err(err);
+                }
+            }
+        } else if let Some(amount_num) = amount_num {
+            amount_num as u128
+        } else {
+            let err = JsonRpcError {
+                code: -32602,
+                message: "Missing or invalid 'amount' field".to_string(),
+                data: None,
+            };
+            error!("p3p_mintToken error: {:?}", err);
+            return Err(err);
+        };
+        
+        let nonce = obj.get("nonce").and_then(|v| v.as_u64()).ok_or_else(|| {
+            let err = JsonRpcError {
+                code: -32602,
+                message: "Missing or invalid 'nonce' field".to_string(),
+                data: None,
+            };
+            error!("p3p_mintToken error: {:?}", err);
+            err
+        })?;
+        
+        let signature_hex = obj.get("signature").and_then(|v| v.as_str()).ok_or_else(|| {
+            let err = JsonRpcError {
+                code: -32602,
+                message: "Missing 'signature' field".to_string(),
+                data: None,
+            };
+            error!("p3p_mintToken error: {:?}", err);
+            err
+        })?;
+        
+        // Parse from address
+        let from_bytes = hex::decode(from_hex.trim_start_matches("0x")).map_err(|e| {
+            JsonRpcError {
+                code: -32602,
+                message: "Invalid from address".to_string(),
+                data: Some(serde_json::to_value(e.to_string()).unwrap()),
+            }
+        })?;
+        
+        if from_bytes.len() != 32 {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "Invalid from address length".to_string(),
+                data: None,
+            });
+        }
+        
+        let mut from = [0u8; 32];
+        from.copy_from_slice(&from_bytes);
+        
+        // Parse to address
+        let to_bytes = hex::decode(to_hex.trim_start_matches("0x")).map_err(|e| {
+            JsonRpcError {
+                code: -32602,
+                message: "Invalid to address".to_string(),
+                data: Some(serde_json::to_value(e.to_string()).unwrap()),
+            }
+        })?;
+        
+        if to_bytes.len() != 32 {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "Invalid to address length".to_string(),
+                data: None,
+            });
+        }
+        
+        let mut to = [0u8; 32];
+        to.copy_from_slice(&to_bytes);
+        
+        // Parse signature
+        let signature_bytes = hex::decode(signature_hex.trim_start_matches("0x")).map_err(|e| {
+            JsonRpcError {
+                code: -32602,
+                message: "Invalid signature".to_string(),
+                data: Some(serde_json::to_value(e.to_string()).unwrap()),
+            }
+        })?;
+        
+        if signature_bytes.len() != 64 {
+            return Err(JsonRpcError {
+                code: -32602,
+                message: "Invalid signature length".to_string(),
+                data: None,
+            });
+        }
+        
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&signature_bytes);
+        
+        // Create the SystemMsg
+        core::types::SystemMsg::Mint {
+            from,
+            to,
+            token_id,
+            amount,
+            nonce,
+            signature: core::types::Signature(signature),
+        }
+    } else {
         let err = JsonRpcError {
             code: -32602,
-            message: "Invalid message: expected string".to_string(),
+            message: "Invalid message format: expected string or object".to_string(),
             data: None,
         };
         error!("p3p_mintToken error: {:?}", err);
-        err
-    })?;
-
-    // Parse the message
-    let message_bytes = match hex::decode(message_hex) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            let err = JsonRpcError {
-                code: -32602,
-                message: format!("Invalid message hex: {}", e),
-                data: Some(serde_json::to_value(e.to_string()).unwrap()),
-            };
-            error!("p3p_mintToken error: {:?}", err);
-            return Err(err);
-        }
-    };
-
-    let message: core::types::SystemMsg = match bincode::deserialize(&message_bytes) {
-        Ok(msg) => {
-            info!("Successfully deserialized message: {:?}", msg);
-            msg
-        },
-        Err(e) => {
-            let err = JsonRpcError {
-                code: -32602,
-                message: format!("Failed to deserialize message: {}", e),
-                data: Some(serde_json::to_value(e.to_string()).unwrap()),
-            };
-            error!("p3p_mintToken error: {:?}", err);
-            return Err(err);
-        }
+        return Err(err);
     };
 
     // Process the message
@@ -993,18 +1151,30 @@ fn handle_mint_token(
                 let mut smt = state.smt.lock().unwrap();
                 
                 // Get the issuer's account
-                let mut issuer_account = match smt.get_account_with_token(&from, token_id) {
-                    Ok(account) => account,
+                info!("Attempting to mint token {} from issuer {:?} to recipient {:?}", token_id, from, to);
+                
+                // Check if the token exists
+                match smt.get_token(token_id) {
+                    Ok(token) => {
+                        info!("Found token {}: issuer={:?}, metadata={}", token_id, token.issuer, token.metadata);
+                    },
                     Err(e) => {
-                        // Check if the token exists first
-                        if let Err(token_err) = smt.get_token(token_id) {
-                            return Err(JsonRpcError {
-                                code: -32603,
-                                message: format!("Token not found: {}", token_err),
-                                data: Some(serde_json::to_value(token_err.to_string()).unwrap()),
-                            });
-                        }
-                        
+                        let err = JsonRpcError {
+                            code: -32603,
+                            message: format!("Token not found: {}", e),
+                            data: Some(serde_json::to_value(e.to_string()).unwrap()),
+                        };
+                        error!("p3p_mintToken error: {:?}", err);
+                        return Err(err);
+                    }
+                }
+                
+                let mut issuer_account = match smt.get_account_with_token(&from, token_id) {
+                    Ok(account) => {
+                        info!("Found issuer account for token {}: balance={}, nonce={}", token_id, account.bal, account.nonce);
+                        account
+                    },
+                    Err(e) => {
                         // If the issuer account doesn't exist, create a new one
                         info!("Creating new issuer account for token {}: {}", token_id, e);
                         core::types::AccountLeaf::new_empty(from, token_id)
@@ -1025,6 +1195,39 @@ fn handle_mint_token(
                 // The mint_token function will handle updating both accounts and the token supply
 
                 // Use the mint_token method to handle all the updates in one go
+                info!("Attempting to mint token with ID {} from {:?} to {:?} with amount {} and nonce {}",
+                      token_id, from, to, amount, nonce);
+                
+                // Get the token info first to verify it exists
+                match smt.get_token(token_id) {
+                    Ok(token) => {
+                        info!("Found token with ID {}: issuer={:?}, metadata={}",
+                              token_id, token.issuer, token.metadata);
+                        
+                        // Check if the issuer is authorized
+                        if token.issuer != from {
+                            let err = JsonRpcError {
+                                code: -32603,
+                                message: format!("Unauthorized: only the token issuer can mint tokens"),
+                                data: Some(serde_json::to_value(format!(
+                                    "Expected issuer {:?}, got {:?}", token.issuer, from
+                                )).unwrap()),
+                            };
+                            error!("p3p_mintToken error: {:?}", err);
+                            return Err(err);
+                        }
+                    },
+                    Err(e) => {
+                        let err = JsonRpcError {
+                            code: -32603,
+                            message: format!("Token not found: {}", e),
+                            data: Some(serde_json::to_value(e.to_string()).unwrap()),
+                        };
+                        error!("p3p_mintToken error: {:?}", err);
+                        return Err(err);
+                    }
+                }
+                
                 match smt.mint_token(&from, &to, token_id, amount, nonce) {
                     Ok(new_supply) => {
                         info!("Successfully minted {} tokens with ID {}. New supply: {}", amount, token_id, new_supply);
@@ -1051,8 +1254,11 @@ fn handle_mint_token(
 
             info!("Mint transaction successful, hash: {}", tx_hash);
             
-            // Return the transaction hash
-            Ok(serde_json::json!(tx_hash))
+            // Return a structured response with transaction hash and status
+            Ok(serde_json::json!({
+                "tx_hash": tx_hash,
+                "status": "ok"
+            }))
         },
         _ => {
             let err = JsonRpcError {
@@ -1168,12 +1374,27 @@ fn handle_mint(
     let mut to = [0u8; 32];
     to.copy_from_slice(&to_bytes);
 
-    // Parse amount
-    let amount = params[3].as_u64().ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Invalid amount".to_string(),
-        data: None,
-    })?;
+    // Parse amount as either a JSON number or a decimal string
+    let amount: u128 = if let Some(amount_num) = params[3].as_u64() {
+        amount_num as u128
+    } else if let Some(amount_str) = params[3].as_str() {
+        match amount_str.parse::<u128>() {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                return Err(JsonRpcError {
+                    code: -32602,
+                    message: format!("Invalid amount string: {}", e),
+                    data: None,
+                });
+            }
+        }
+    } else {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Invalid amount: expected number or string".to_string(),
+            data: None,
+        });
+    };
 
     // Create the message that was signed
     let message = format!("mint:{}:{}", to_hex, amount);
@@ -1327,8 +1548,11 @@ fn handle_mint(
         hex::encode(result)
     };
 
-    // Return the transaction hash
-    Ok(serde_json::json!(tx_hash))
+    // Return a structured response with transaction hash and status
+    Ok(serde_json::json!({
+        "tx_hash": tx_hash,
+        "status": "ok"
+    }))
 }
 
 /// Handles the get_total_supply method.
@@ -1826,6 +2050,8 @@ fn handle_send(
             // Return the transaction hash
             Ok(serde_json::json!(tx_hash_hex))
         }
+    
+    
 
 
 
@@ -2133,7 +2359,8 @@ fn handle_get_all_balances(
         balances
     };
 
-    // Return the balances as a JSON array
+
+        // Return the balances as a JSON array
     Ok(serde_json::json!(balances))
 }
 

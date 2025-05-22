@@ -73,8 +73,10 @@ pub async fn run<P: AsRef<Path>>(
     };
 
     // Serialize the message for signing
+    println!("Message before serialization: {:?}", message);
     let message_bytes = bincode::serialize(&message)
         .map_err(|e| WalletError::TransactionError(format!("Failed to serialize message: {}", e)))?;
+    println!("Serialized message bytes (first 10): {:?}", &message_bytes[..10.min(message_bytes.len())]);
 
     // Sign the message
     let signature = wallet.sign(&message_bytes)?;
@@ -169,6 +171,38 @@ async fn get_proof_from_node(node_url: &str, address: &Address, token_id: u64) -
     let client = reqwest::Client::new();
     let address_hex = hex::encode(address);
     
+    // Try to get the balance first to check if the account exists
+    let balance_response = client
+        .post(&rpc_url)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getBalanceWithToken",
+            "params": [address_hex, token_id]
+        }))
+        .send()
+        .await
+        .map_err(|e| WalletError::NetworkError(format!("Failed to connect to node: {}", e)))?;
+    
+    let balance_json: serde_json::Value = balance_response
+        .json()
+        .await
+        .map_err(|e| WalletError::NetworkError(format!("Failed to parse response: {}", e)))?;
+    
+    // If there's an error, the account might not exist yet
+    if balance_json.get("error").is_some() {
+        // Create a default proof for a non-existent account
+        info!("Account for address {:?} with token {} does not exist yet, creating default proof", address, token_id);
+        
+        // Create a default proof with empty siblings and path
+        let siblings = Vec::new();
+        let leaf_hash = [0u8; 32];
+        let path = Vec::new();
+        
+        return Ok(Proof::new(siblings, leaf_hash, path, 0));
+    }
+    
+    // If the account exists, get the proof
     let response = client
         .post(&rpc_url)
         .json(&serde_json::json!({
@@ -289,6 +323,51 @@ async fn get_nonce_from_node(node_url: &str, address: &Address, token_id: u64) -
     let client = reqwest::Client::new();
     let address_hex = hex::encode(address);
     
+    // First check if the token exists
+    let token_response = client
+        .post(&rpc_url)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "get_tokens",
+            "params": []
+        }))
+        .send()
+        .await
+        .map_err(|e| WalletError::NetworkError(format!("Failed to connect to node: {}", e)))?;
+    
+    let token_json: serde_json::Value = token_response
+        .json()
+        .await
+        .map_err(|e| WalletError::NetworkError(format!("Failed to parse response: {}", e)))?;
+    
+    if let Some(error) = token_json.get("error") {
+        return Err(WalletError::NetworkError(format!(
+            "Node returned error: {}",
+            error
+        )));
+    }
+    
+    // Check if the token exists
+    let tokens = token_json
+        .get("result")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| WalletError::NetworkError("Invalid response format".to_string()))?;
+    
+    let token_exists = tokens.iter().any(|token| {
+        token.get("token_id")
+            .and_then(|id| id.as_u64())
+            .map_or(false, |id| id == token_id)
+    });
+    
+    if !token_exists {
+        return Err(WalletError::NetworkError(format!(
+            "Token with ID {} does not exist",
+            token_id
+        )));
+    }
+    
+    // Now get the nonce
     let response = client
         .post(&rpc_url)
         .json(&serde_json::json!({
@@ -352,19 +431,47 @@ async fn broadcast_mint_token_to_node(
     
     let client = reqwest::Client::new();
     
-    // Serialize the message to a hex string
-    let message_bytes = bincode::serialize(message)
-        .map_err(|e| WalletError::TransactionError(format!("Failed to serialize message: {}", e)))?;
+    // Extract the fields from the message
+    let (from, to, token_id, amount, nonce, signature) = match message {
+        core::types::SystemMsg::Mint { from, to, token_id, amount, nonce, signature } => {
+            (from, to, token_id, amount, nonce, signature)
+        },
+        _ => return Err(WalletError::TransactionError("Expected Mint message".to_string())),
+    };
     
-    let message_hex = hex::encode(&message_bytes);
+    // Convert addresses and signature to hex strings
+    let from_hex = hex::encode(from);
+    let to_hex = hex::encode(to);
+    let signature_hex = hex::encode(signature.0);
+    
+    println!("From address: {}", from_hex);
+    println!("To address: {}", to_hex);
+    println!("Token ID: {}", token_id);
+    println!("Amount: {}", amount);
+    println!("Nonce: {}", nonce);
+    println!("Signature: {}", signature_hex);
+    
+    // Create a JSON object with the message fields
+    let message_json = serde_json::json!({
+        "from": from_hex,
+        "to": to_hex,
+        "token_id": token_id,
+        "amount": amount.to_string(), // Send as string to handle large values
+        "nonce": nonce,
+        "signature": signature_hex
+    });
+    
+    println!("JSON message: {}", serde_json::to_string_pretty(&message_json).unwrap());
     
     // Log the request for debugging
     let request_body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "p3p_mintToken",
-        "params": [message_hex]
+        "params": [message_json]
     });
+    
+    println!("Sending RPC request: {}", serde_json::to_string_pretty(&request_body).unwrap());
     
     info!("Sending RPC request to {}: {}", rpc_url, serde_json::to_string_pretty(&request_body).unwrap_or_default());
     
@@ -382,6 +489,9 @@ async fn broadcast_mint_token_to_node(
     
     info!("Raw RPC response (status {}): {}", response_status, response_text);
     
+    // Print the raw response for debugging
+    println!("DEBUG: Raw RPC response: {}", response_text);
+    
     // Parse the response as JSON
     let response_json: serde_json::Value = match serde_json::from_str(&response_text) {
         Ok(json) => json,
@@ -392,35 +502,54 @@ async fn broadcast_mint_token_to_node(
         }
     };
 
+    // Check if there's an error in the response
     if let Some(error) = response_json.get("error") {
-        // Log the raw error for debugging
-        debug!("Node returned error response: {:?}", error);
-        
-        // Extract the error message if possible
-        let error_msg = if let Some(msg) = error.get("message") {
-            msg.as_str().unwrap_or("Unknown error")
-        } else {
-            "Unknown error"
-        };
-        
-        // Extract the error data if available
-        let error_data = if let Some(data) = error.get("data") {
-            format!(": {}", data)
-        } else {
-            String::new()
-        };
-        
-        return Err(WalletError::NetworkError(format!(
-            "Node returned error: {}{}",
-            error_msg, error_data
-        )));
+        if !error.is_null() {
+            // Log the raw error for debugging
+            debug!("Node returned error response: {:?}", error);
+            
+            // Extract the error message if possible
+            let error_msg = if let Some(msg) = error.get("message") {
+                msg.as_str().unwrap_or("Unknown error")
+            } else {
+                "Unknown error"
+            };
+            
+            // Extract the error data if available
+            let error_data = if let Some(data) = error.get("data") {
+                format!(": {}", data)
+            } else {
+                String::new()
+            };
+            
+            return Err(WalletError::NetworkError(format!(
+                "Node returned error: {}{}",
+                error_msg, error_data
+            )));
+        }
     }
 
-    let tx_hash = response_json
-        .get("result")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| WalletError::NetworkError("Invalid response format".to_string()))?
-        .to_string();
+    // Handle both the new structured response format and the old string format
+    let tx_hash = if let Some(result_obj) = response_json.get("result").and_then(|v| v.as_object()) {
+        // New format: {"tx_hash": "...", "status": "ok"}
+        result_obj.get("tx_hash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WalletError::NetworkError("Missing tx_hash in response".to_string()))?
+            .to_string()
+    } else if let Some(result_str) = response_json.get("result").and_then(|v| v.as_str()) {
+        // Old format: direct string hash
+        result_str.to_string()
+    } else if response_json.get("result").is_some() {
+        // If result exists but is neither an object nor a string, try to convert it to a string
+        match serde_json::to_string(response_json.get("result").unwrap()) {
+            Ok(s) => s,
+            Err(_) => return Err(WalletError::NetworkError("Invalid response format".to_string()))
+        }
+    } else {
+        // No result field
+        return Err(WalletError::NetworkError("Missing result in response".to_string()));
+    };
 
+    info!("Mint transaction successful, hash: {}", tx_hash);
     Ok(tx_hash)
 }

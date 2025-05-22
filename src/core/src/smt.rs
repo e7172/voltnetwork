@@ -698,7 +698,11 @@ impl SMT {
         let token_info = self.get_token(token_id)?;
         
         // Check if the issuer is authorized to mint this token
+        info!("Checking if issuer {:?} is authorized to mint token {} with issuer {:?}",
+              issuer, token_id, token_info.issuer);
         if token_info.issuer != *issuer {
+            error!("Unauthorized mint attempt: expected issuer {:?}, got {:?}",
+                  token_info.issuer, issuer);
             return Err(CoreError::Unauthorized(format!(
                 "Only the token issuer can mint tokens: expected {:?}, got {:?}",
                 token_info.issuer, issuer
