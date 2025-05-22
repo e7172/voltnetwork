@@ -58,6 +58,10 @@ To initialize the network:
 mkdir -p ~/.volt/node1
 ```
 
+./target/release/cli --node http://127.0.0.1:8545 send --to 0x1234567890123456789012345678901234567890123456789012345678901234 --amount 25
+
+RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node2 --rpc-addr 127.0.0.1:8546 --listen /ip4/0.0.0.0/tcp/30334 --bootstrap /ip4/127.0.0.1/tcp/30333/p2p/12D3KooWFLgDCWydALF2UWshhHTcGNfNJCCrQGg6hmJd35BsPnPf
+
 RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node1 --rpc-addr 0.0.0.0:8545 --listen /ip4/0.0.0.0/tcp/30333 --bootstrap /ip4/3.90.180.149/tcp/30333/p2p/12D3KooWRnHujasvH4mk62xyJuf8msEgAkmBowW8HvU3wkJuvArX
 
 ### Using the CLI Wallet

@@ -274,8 +274,9 @@ async fn main() -> Result<()> {
         info!("Metrics server listening on {}", opt.metrics_addr);
     }
 
-    // Create a channel for broadcasting messages
+    // Create channels for broadcasting messages
     let (gossip_tx, mut gossip_rx) = tokio::sync::mpsc::channel::<network::types::MintMsg>(100);
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<network::types::UpdateMsg>(100);
     
     // Start JSON-RPC server if enabled
     if opt.rpc {
@@ -283,10 +284,11 @@ async fn main() -> Result<()> {
         let smt_clone = smt.clone();
         let proof_store_clone = proof_store.clone();
         
-        // Create a shared reference to the gossip sender
+        // Create shared references to the gossip senders
         let gossip_tx = Arc::new(Mutex::new(gossip_tx));
+        let update_tx = Arc::new(Mutex::new(update_tx));
         
-        rpc::start_rpc_server(rpc_addr, smt_clone, proof_store_clone, local_peer_id, gossip_tx).await?;
+        rpc::start_rpc_server(rpc_addr, smt_clone, proof_store_clone, local_peer_id, gossip_tx, update_tx).await?;
         info!("JSON-RPC server listening on {}", opt.rpc_addr);
     }
     
@@ -317,6 +319,37 @@ async fn main() -> Result<()> {
                 },
                 Err(e) => {
                     error!("Failed to serialize mint message: {}", e);
+                }
+            }
+        }
+    });
+    
+    // Spawn a task to handle update messages
+    let swarm_for_updates = swarm_clone.clone();
+    
+    tokio::spawn(async move {
+        while let Some(update_msg) = update_rx.recv().await {
+            // Serialize the update message
+            match bincode::serialize(&update_msg) {
+                Ok(update_msg_bytes) => {
+                    // Create a topic
+                    let topic = libp2p::gossipsub::IdentTopic::new(network::gossip::STATE_UPDATES_TOPIC);
+                    
+                    // Get a mutable reference to the swarm
+                    let mut swarm = swarm_for_updates.lock().unwrap();
+                    
+                    // Publish the message
+                    match swarm.behaviour_mut().gossipsub.publish(topic, update_msg_bytes) {
+                        Ok(_) => {
+                            info!("Successfully broadcast update message");
+                        },
+                        Err(e) => {
+                            error!("Failed to broadcast update message: {}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    error!("Failed to serialize update message: {}", e);
                 }
             }
         }
@@ -410,11 +443,23 @@ async fn main() -> Result<()> {
     while let Some(event) = rx.recv().await {
         match event {
             NetworkEvent::UpdateReceived(update) => {
-                handle_update(update, &smt, &proof_store).await?;
+                info!("Received update from network: from={:?}, to={:?}, amount={}",
+                      update.from, update.to, update.amount);
+                
+                match handle_update(update, &smt, &proof_store).await {
+                    Ok(_) => info!("Successfully processed update from network"),
+                    Err(e) => error!("Failed to process update from network: {}", e),
+                }
             }
             NetworkEvent::PeerDiscovered(peer_id) => {
                 info!("Discovered peer: {}", peer_id);
                 metrics::PEER_COUNT.inc();
+                
+                // Add the peer to our gossipsub mesh
+                let mut swarm = swarm_mutex.lock().unwrap();
+                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                
+                info!("Added peer {} to gossipsub mesh", peer_id);
             }
             NetworkEvent::PeerDisconnected(peer_id) => {
                 info!("Disconnected from peer: {}", peer_id);
@@ -422,6 +467,15 @@ async fn main() -> Result<()> {
             }
             NetworkEvent::PeerIdentified(peer_id, addr) => {
                 info!("Identified peer {} at {}", peer_id, addr);
+                
+                // Add the peer to our gossipsub mesh
+                let mut swarm = swarm_mutex.lock().unwrap();
+                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                
+                // Also add the address to Kademlia for better connectivity
+                swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                
+                info!("Added peer {} to gossipsub mesh", peer_id);
             }
             _ => {}
         }

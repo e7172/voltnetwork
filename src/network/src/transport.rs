@@ -117,9 +117,10 @@ pub async fn init_swarm(
     // Add bootstrap nodes
     for addr in bootstrap_nodes {
         // Generate a random peer ID for bootstrap nodes
+        // This is a temporary solution - in production, you would want to use the actual peer ID
         let peer_id = PeerId::random();
-        kademlia.add_address(&peer_id, addr);
-        log::info!("Added bootstrap node: {}", peer_id);
+        kademlia.add_address(&peer_id, addr.clone());
+        log::info!("Added bootstrap node: {} at {}", peer_id, addr);
     }
 
     // Create a Gossipsub instance
@@ -260,3 +261,5 @@ pub fn handle_network_event_sync(
 
     Ok(None)
 }
+
+// No replacement needed - removing the function

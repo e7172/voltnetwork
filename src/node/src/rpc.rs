@@ -66,6 +66,8 @@ struct RpcState {
     peer_id: String,
     /// Channel for broadcasting mint messages
     gossip_tx: Arc<Mutex<tokio::sync::mpsc::Sender<network::types::MintMsg>>>,
+    /// Channel for broadcasting update messages
+    update_tx: Arc<Mutex<tokio::sync::mpsc::Sender<network::types::UpdateMsg>>>,
 }
 
 /// Starts the JSON-RPC server.
@@ -75,8 +77,9 @@ pub async fn start_rpc_server(
     proof_store: ProofStore,
     peer_id: String,
     gossip_tx: Arc<Mutex<tokio::sync::mpsc::Sender<network::types::MintMsg>>>,
+    update_tx: Arc<Mutex<tokio::sync::mpsc::Sender<network::types::UpdateMsg>>>,
 ) -> Result<()> {
-    let state = Arc::new(RpcState { smt, proof_store, peer_id, gossip_tx });
+    let state = Arc::new(RpcState { smt, proof_store, peer_id, gossip_tx, update_tx });
 
     let rpc_route = warp::path("rpc")
         .and(warp::post())
@@ -1691,6 +1694,26 @@ fn handle_send(
                         data: Some(serde_json::to_value(e.to_string()).unwrap()),
                     }
                 })?;
+            }
+
+            // Create an UpdateMsg to broadcast to other nodes
+            let update_msg = network::types::UpdateMsg {
+                from,
+                to,
+                amount,
+                root,
+                proof_from,
+                proof_to,
+                nonce,
+                signature: core::types::Signature(signature),
+            };
+
+            // Broadcast the update to other nodes using the update_tx channel
+            if let Err(e) = state.update_tx.lock().unwrap().try_send(update_msg) {
+                // Log the error but don't fail the transaction
+                tracing::error!("Failed to broadcast update: {}", e);
+            } else {
+                tracing::info!("Successfully queued transaction update for broadcast");
             }
         
             // Generate a transaction hash
