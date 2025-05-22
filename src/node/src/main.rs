@@ -1047,10 +1047,33 @@ pub async fn handle_update(
             accounts: accounts.clone(),
             root: current_root,
         };
+    }
+    
+    // Broadcast the update message to all peers
+    // This is done outside the lock to avoid deadlocks
+    {
+        let mut swarm = swarm_mutex.lock().unwrap();
         
-        // Queue the full state for broadcast
-        // This is done outside the lock to avoid deadlocks
-        info!("Successfully queued full state for broadcast");
+        // Serialize the update message
+        match bincode::serialize(&update) {
+            Ok(update_bytes) => {
+                // Create a topic
+                let topic = libp2p::gossipsub::IdentTopic::new(network::gossip::STATE_UPDATES_TOPIC);
+                
+                // Publish the message
+                match swarm.behaviour_mut().gossipsub.publish(topic, update_bytes) {
+                    Ok(_) => {
+                        info!("Successfully broadcast update message to all peers");
+                    },
+                    Err(e) => {
+                        error!("Failed to broadcast update message: {}", e);
+                    }
+                }
+            },
+            Err(e) => {
+                error!("Failed to serialize update message: {}", e);
+            }
+        }
     }
     
     // Store the proofs for future use
