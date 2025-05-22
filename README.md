@@ -137,9 +137,9 @@ RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node1 --rpc-addr 1
 # Check balances
 
 ./target/release/cli --node http://127.0.0.1:8545 balance
-./target/release/cli --node http://127.0.0.1:8547 balance
+./target/release/cli --node http://3.90.180.149:8545 balance
 ./target/release/cli --node http://127.0.0.1:8546 balance
 
 # Make transactions
 
-./target/release/cli --node http://127.0.0.1:8545 send --to 0xdcc80a50e84955049514913bd424ce6cbdff2bca048c612ab9eecbc7d703fa7e --amount 25
+./target/release/cli --node http://127.0.0.1:8545 send --to 9cb7172568195016efbb0a4c1db3fd2f85eb00c02ccdfc6aff1f08901bec56c3 --amount 25

@@ -195,28 +195,37 @@ impl SMT {
     fn persist_to_db(&self) -> Result<(), CoreError> {
         let db = self.db.as_ref().ok_or_else(|| CoreError::SMTError("No DB instance available".to_string()))?;
         
-        // Persist the root
-        db.put(ROOT_KEY, bincode::serialize(&self.root)
+        // Get column family handles
+        let cf_meta = db.cf_handle("meta").ok_or_else(|| {
+            CoreError::SMTError("Column family 'meta' not found".to_string())
+        })?;
+        
+        let cf_leaves = db.cf_handle("leaves").ok_or_else(|| {
+            CoreError::SMTError("Column family 'leaves' not found".to_string())
+        })?;
+        
+        // Persist the root in the meta column family
+        db.put_cf(&cf_meta, ROOT_KEY, bincode::serialize(&self.root)
             .map_err(|e| CoreError::SerializationError(e.to_string()))?)
             .map_err(|e| CoreError::SMTError(format!("Failed to persist root: {}", e)))?;
         
-        // Persist the next token ID
-        db.put(NEXT_TOKEN_ID_KEY, bincode::serialize(&self.next_token_id)
+        // Persist the next token ID in the meta column family
+        db.put_cf(&cf_meta, NEXT_TOKEN_ID_KEY, bincode::serialize(&self.next_token_id)
             .map_err(|e| CoreError::SerializationError(e.to_string()))?)
             .map_err(|e| CoreError::SMTError(format!("Failed to persist next token ID: {}", e)))?;
         
-        // Persist accounts
+        // Persist accounts in the leaves column family
         for ((addr, token_id), leaf) in &self.accounts {
-            let key = format!("{}{:?}:{}", ACCOUNT_PREFIX, addr, token_id);
-            db.put(key.as_bytes(), bincode::serialize(leaf)
+            let key = compute_leaf_key(addr, *token_id);
+            db.put_cf(&cf_leaves, key.as_ref(), bincode::serialize(leaf)
                 .map_err(|e| CoreError::SerializationError(e.to_string()))?)
                 .map_err(|e| CoreError::SMTError(format!("Failed to persist account: {}", e)))?;
         }
         
-        // Persist tokens
+        // Persist tokens in the meta column family
         for (token_id, info) in &self.token_registry {
             let key = format!("{}{}", TOKEN_PREFIX, token_id);
-            db.put(key.as_bytes(), bincode::serialize(info)
+            db.put_cf(&cf_meta, key.as_bytes(), bincode::serialize(info)
                 .map_err(|e| CoreError::SerializationError(e.to_string()))?)
                 .map_err(|e| CoreError::SMTError(format!("Failed to persist token: {}", e)))?;
         }
@@ -229,8 +238,25 @@ impl SMT {
         let mut smt = Self::new_zero();
         smt.db = Some(Arc::clone(&db));
         
-        // Load the root
-        if let Some(root_bytes) = db.get(ROOT_KEY)
+        // Get column family handles
+        let cf_meta = match db.cf_handle("meta") {
+            Some(cf) => cf,
+            None => {
+                info!("Column family 'meta' not found, using default state");
+                return Ok(smt);
+            }
+        };
+        
+        let cf_leaves = match db.cf_handle("leaves") {
+            Some(cf) => cf,
+            None => {
+                info!("Column family 'leaves' not found, using default state");
+                return Ok(smt);
+            }
+        };
+        
+        // Load the root from meta column family
+        if let Some(root_bytes) = db.get_cf(&cf_meta, ROOT_KEY)
             .map_err(|e| CoreError::SMTError(format!("Failed to get root: {}", e)))?
         {
             let root: [u8; 32] = bincode::deserialize(&root_bytes)
@@ -240,8 +266,8 @@ impl SMT {
             info!("No root found in DB, using default");
         }
         
-        // Load the next token ID
-        if let Some(next_token_id_bytes) = db.get(NEXT_TOKEN_ID_KEY)
+        // Load the next token ID from meta column family
+        if let Some(next_token_id_bytes) = db.get_cf(&cf_meta, NEXT_TOKEN_ID_KEY)
             .map_err(|e| CoreError::SMTError(format!("Failed to get next token ID: {}", e)))?
         {
             smt.next_token_id = bincode::deserialize(&next_token_id_bytes)
@@ -250,18 +276,11 @@ impl SMT {
             info!("No next token ID found in DB, using default");
         }
         
-        // Load accounts
-        let account_prefix = ACCOUNT_PREFIX.as_bytes();
-        let iter = db.iterator(IteratorMode::From(account_prefix, rocksdb::Direction::Forward));
+        // Load accounts from leaves column family
+        let iter = db.iterator_cf(&cf_leaves, IteratorMode::Start);
         
         for item in iter {
             let (key, value) = item.map_err(|e| CoreError::SMTError(format!("Failed to iterate accounts: {}", e)))?;
-            
-            let key_str = String::from_utf8_lossy(&key);
-            if !key_str.starts_with(ACCOUNT_PREFIX) {
-                // We've moved past the account prefix
-                break;
-            }
             
             let leaf: AccountLeaf = bincode::deserialize(&value)
                 .map_err(|e| CoreError::SerializationError(e.to_string()))?;
@@ -281,9 +300,9 @@ impl SMT {
             }
         }
         
-        // Load tokens
+        // Load tokens from meta column family
         let token_prefix = TOKEN_PREFIX.as_bytes();
-        let iter = db.iterator(IteratorMode::From(token_prefix, rocksdb::Direction::Forward));
+        let iter = db.iterator_cf(&cf_meta, IteratorMode::From(token_prefix, rocksdb::Direction::Forward));
         
         for item in iter {
             let (key, value) = item.map_err(|e| CoreError::SMTError(format!("Failed to iterate tokens: {}", e)))?;
@@ -339,14 +358,19 @@ impl SMT {
         
         // Persist to RocksDB if available
         if let Some(db) = &self.db {
-            // Persist the token info
+            // Get column family handle for meta
+            let cf_meta = db.cf_handle("meta").ok_or_else(|| {
+                CoreError::SMTError("Column family 'meta' not found".to_string())
+            })?;
+            
+            // Persist the token info to meta column family
             let token_key = format!("{}{}", TOKEN_PREFIX, token_id);
-            db.put(token_key.as_bytes(), bincode::serialize(&token_info)
+            db.put_cf(&cf_meta, token_key.as_bytes(), bincode::serialize(&token_info)
                 .map_err(|e| CoreError::SerializationError(e.to_string()))?)
                 .map_err(|e| CoreError::SMTError(format!("Failed to persist token: {}", e)))?;
             
-            // Persist the updated next token ID
-            db.put(NEXT_TOKEN_ID_KEY, bincode::serialize(&self.next_token_id)
+            // Persist the updated next token ID to meta column family
+            db.put_cf(&cf_meta, NEXT_TOKEN_ID_KEY, bincode::serialize(&self.next_token_id)
                 .map_err(|e| CoreError::SerializationError(e.to_string()))?)
                 .map_err(|e| CoreError::SMTError(format!("Failed to persist next token ID: {}", e)))?;
         }
@@ -385,9 +409,14 @@ impl SMT {
         
         // Persist to RocksDB if available
         if let Some(db) = &self.db {
-            // Persist the updated token info
+            // Get column family handle for meta
+            let cf_meta = db.cf_handle("meta").ok_or_else(|| {
+                CoreError::SMTError("Column family 'meta' not found".to_string())
+            })?;
+            
+            // Persist the updated token info to meta column family
             let token_key = format!("{}{}", TOKEN_PREFIX, token_id);
-            db.put(token_key.as_bytes(), bincode::serialize(&token_info)
+            db.put_cf(&cf_meta, token_key.as_bytes(), bincode::serialize(&token_info)
                 .map_err(|e| CoreError::SerializationError(e.to_string()))?)
                 .map_err(|e| CoreError::SMTError(format!("Failed to persist token: {}", e)))?;
         }
@@ -442,11 +471,28 @@ impl SMT {
 
         // Persist to RocksDB if available
         if let Some(db) = &self.db {
-            // Persist the updated account
-            let account_key = format!("{}{:?}:{}", ACCOUNT_PREFIX, leaf.addr, leaf.token_id);
+            // Get column family handles
+            let cf_meta = match db.cf_handle("meta") {
+                Some(cf) => cf,
+                None => {
+                    error!("Column family 'meta' not found");
+                    return Err(CoreError::SMTError("Column family 'meta' not found".to_string()));
+                }
+            };
+            
+            let cf_leaves = match db.cf_handle("leaves") {
+                Some(cf) => cf,
+                None => {
+                    error!("Column family 'leaves' not found");
+                    return Err(CoreError::SMTError("Column family 'leaves' not found".to_string()));
+                }
+            };
+            
+            // Persist the updated account to the leaves column family
+            let key = compute_leaf_key(&leaf.addr, leaf.token_id);
             match bincode::serialize(&leaf) {
                 Ok(serialized) => {
-                    if let Err(e) = db.put(account_key.as_bytes(), serialized) {
+                    if let Err(e) = db.put_cf(&cf_leaves, key.as_ref(), serialized) {
                         error!("Failed to persist account to RocksDB: {}", e);
                         // In production, we continue even if persistence fails
                         // This ensures the in-memory state remains correct
@@ -460,10 +506,10 @@ impl SMT {
                 }
             }
             
-            // Persist the updated root
+            // Persist the updated root to the meta column family
             match bincode::serialize(&self.root) {
                 Ok(serialized) => {
-                    if let Err(e) = db.put(ROOT_KEY, serialized) {
+                    if let Err(e) = db.put_cf(&cf_meta, ROOT_KEY, serialized) {
                         error!("Failed to persist root to RocksDB: {}", e);
                         // In production, we continue even if persistence fails
                     } else {
@@ -889,32 +935,35 @@ impl SMT {
                     
                     // Try to load from RocksDB if available
                     if let Some(db) = &self.db {
-                        let account_key = format!("{}{:?}:{}", ACCOUNT_PREFIX, addr, token_id);
-                        match db.get(account_key.as_bytes()) {
-                            Ok(Some(data)) => {
-                                match bincode::deserialize::<AccountLeaf>(&data) {
-                                    Ok(account) => {
-                                        // Update the cache
-                                        let account_clone = account.clone();
-                                        let mut accounts = self.accounts.clone();
-                                        accounts.insert((*addr, token_id), account_clone);
-                                        
-                                        // Return the account
-                                        return Ok(account);
-                                    },
-                                    Err(e) => {
-                                        warn!("Failed to deserialize account from RocksDB: {}", e);
-                                        // Fall through to default behavior
+                        // Get column family handle for leaves
+                        if let Some(cf_leaves) = db.cf_handle("leaves") {
+                            let key = compute_leaf_key(addr, token_id);
+                            match db.get_cf(&cf_leaves, key.as_ref()) {
+                                Ok(Some(data)) => {
+                                    match bincode::deserialize::<AccountLeaf>(&data) {
+                                        Ok(account) => {
+                                            // Update the cache
+                                            let account_clone = account.clone();
+                                            let mut accounts = self.accounts.clone();
+                                            accounts.insert((*addr, token_id), account_clone);
+                                            
+                                            // Return the account
+                                            return Ok(account);
+                                        },
+                                        Err(e) => {
+                                            warn!("Failed to deserialize account from RocksDB: {}", e);
+                                            // Fall through to default behavior
+                                        }
                                     }
+                                },
+                                Ok(None) => {
+                                    warn!("Account not found in RocksDB despite being in tree");
+                                    // Fall through to default behavior
+                                },
+                                Err(e) => {
+                                    warn!("Error reading account from RocksDB: {}", e);
+                                    // Fall through to default behavior
                                 }
-                            },
-                            Ok(None) => {
-                                warn!("Account not found in RocksDB despite being in tree");
-                                // Fall through to default behavior
-                            },
-                            Err(e) => {
-                                warn!("Error reading account from RocksDB: {}", e);
-                                // Fall through to default behavior
                             }
                         }
                     }

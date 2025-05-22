@@ -113,7 +113,13 @@ async fn main() -> Result<()> {
     info!("Opening RocksDB for SMT at {}", smt_db_path.display());
     let mut opts = rocksdb::Options::default();
     opts.create_if_missing(true);
-    let db = Arc::new(rocksdb::DB::open(&opts, smt_db_path)
+    opts.create_missing_column_families(true);
+    
+    // Define the column families needed by the SMT
+    let cf_names = vec!["default", "leaves", "meta"];
+    
+    // Open the database with the required column families
+    let db = Arc::new(rocksdb::DB::open_cf(&opts, &smt_db_path, cf_names)
         .map_err(|e| anyhow::anyhow!("Failed to open RocksDB: {}", e))?);
 
     // Initialize SMT - either load from RocksDB or create new
