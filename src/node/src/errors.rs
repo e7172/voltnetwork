@@ -31,6 +31,9 @@ pub enum NodeError {
 
     /// Error when an operation is unauthorized.
     Unauthorized(String),
+    
+    /// Error when a nonce is invalid.
+    InvalidNonce(String),
 }
 
 impl fmt::Display for NodeError {
@@ -44,6 +47,7 @@ impl fmt::Display for NodeError {
             NodeError::InvalidProof(msg) => write!(f, "Invalid proof for {}", msg),
             NodeError::InvalidSignature(msg) => write!(f, "Invalid signature: {}", msg),
             NodeError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
+            NodeError::InvalidNonce(msg) => write!(f, "Invalid nonce: {}", msg),
         }
     }
 }
