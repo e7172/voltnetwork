@@ -61,18 +61,8 @@ impl Proof {
         let result = computed_root == root;
         println!("Verify - Result: {}", result);
         
-        // For production readiness, we'll add a fallback verification mechanism
-        // This helps with network state synchronization issues
-        if !result {
-            // If the standard verification fails, check if this is a valid transaction
-            // with a different root (which can happen during state transitions)
-            if self.is_valid_transaction_proof() {
-                println!("Verify - Standard verification failed, but proof appears to be a valid transaction");
-                return true;
-            }
-        }
-        
-        // Return the verification result
+        // In a production system, we need strict verification
+        // No fallbacks that compromise security
         result
     }
 
@@ -171,30 +161,7 @@ impl Proof {
         current_hash
     }
     
-    /// Checks if this proof is valid for a transaction, even if the roots don't match.
-    /// This is a fallback verification mechanism for network state synchronization.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the proof appears to be valid for a transaction, `false` otherwise
-    fn is_valid_transaction_proof(&self) -> bool {
-        // Check if the proof has a reasonable structure
-        if self.path.len() != self.siblings.len() || self.path.is_empty() {
-            return false;
-        }
-        
-        // Check if the leaf hash is non-zero (a real account)
-        if self.leaf_hash == [0u8; 32] {
-            return false;
-        }
-        
-        // Check if the siblings are valid (not all zeros)
-        let all_zeros = [0u8; 32];
-        let has_valid_siblings = self.siblings.iter().any(|s| *s != all_zeros);
-        
-        // A valid transaction proof should have at least some non-zero siblings
-        has_valid_siblings
-    }
+    // No insecure fallback verification methods in production code
 }
 
 /// Converts an address to a path in the Sparse Merkle Tree.
