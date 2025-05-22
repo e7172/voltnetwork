@@ -157,7 +157,7 @@ pub async fn init_swarm(
     };
 
     // Create the swarm
-    let swarm = SwarmBuilder::with_executor(
+    let mut swarm = SwarmBuilder::with_executor(
         transport,
         behaviour,
         local_peer_id,
@@ -168,9 +168,17 @@ pub async fn init_swarm(
     .build();
 
     // Create the DHT manager
-    let dht_manager = DHTManager::new();
-
-    Ok((swarm, dht_manager))
+    for addr in bootstrap_nodes.iter() {
+        match swarm.dial(addr.clone()) {
+            Ok(()) => log::info!("Dialed bootstrap peer at {}", addr),
+            Err(e) => log::warn!("Failed to dial {}: {}", addr, e),
+        }
+    }
+ 
+     // Create the DHT manager
+     let dht_manager = DHTManager::new();
+ 
+     Ok((swarm, dht_manager))
 }
 
 /// Handles a network event.
@@ -182,7 +190,9 @@ pub async fn handle_network_event(
 ) -> Result<Option<NetworkEvent>, NetworkError> {
     match event {
         SwarmEvent::Behaviour(NetworkBehaviourEvent::Gossipsub(gossipsub_event)) => {
+            log::debug!("Gossipsub event: {:?}", gossipsub_event);
             if let Some(update) = crate::gossip::handle_gossipsub_event(gossipsub_event)? {
+                log::info!("Received update from gossip network: {:?}", update);
                 return Ok(Some(NetworkEvent::UpdateReceived(update)));
             }
         }
@@ -207,6 +217,12 @@ pub async fn handle_network_event(
         SwarmEvent::ConnectionEstablished {
             peer_id, endpoint, ..
         } => {
+            log::info!("Connection established with peer: {} at {:?}", peer_id, endpoint);
+            
+            // Add the peer to the gossipsub mesh explicitly
+            swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+            log::info!("Added peer {} to gossipsub mesh explicitly", peer_id);
+            
             if known_peers.insert(peer_id) {
                 return Ok(Some(NetworkEvent::PeerDiscovered(peer_id)));
             }
@@ -245,12 +261,19 @@ pub fn handle_network_event_sync(
             info,
             ..
         })) => {
+            log::info!("Identified peer: {} with info: {:?}", peer_id, info);
+            
             // Add the peer's addresses to Kademlia
             if let Some(addr) = info.listen_addrs.into_iter().next() {
                 swarm
                     .behaviour_mut()
                     .kademlia
                     .add_address(&peer_id, addr.clone());
+                log::info!("Added peer {} address {} to Kademlia", peer_id, addr);
+                
+                // Add the peer to the gossipsub mesh explicitly
+                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                log::info!("Added peer {} to gossipsub mesh explicitly", peer_id);
 
                 return Ok(Some(NetworkEvent::PeerIdentified(peer_id, addr)));
             }

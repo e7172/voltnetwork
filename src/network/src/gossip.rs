@@ -25,11 +25,17 @@ pub fn new_gossipsub(
         .heartbeat_interval(std::time::Duration::from_secs(10))
         .validation_mode(ValidationMode::Strict)
         .message_id_fn(message_id_fn)
-        .mesh_n_low(1)        // Allow publishing with as few as 1 peer
-        .mesh_n(3)            // Target 3 peers in mesh (default is 6)
-        .mesh_outbound_min(1) // Require at least 1 outbound peer
+        .mesh_n_low(0)        // Allow publishing with 0 peers (for testing)
+        .mesh_n(1)            // Target just 1 peer in mesh (minimum)
+        .mesh_outbound_min(0) // Don't require any outbound peers
+        .mesh_n_high(2)       // Upper bound for mesh peers
+        .gossip_lazy(1)       // Gossip to at least 1 peer
+        .history_length(5)    // Keep last 5 messages
+        .history_gossip(1)    // Gossip to 1 peer
         .build()
         .map_err(|e| NetworkError::GossipError(e.to_string()))?;
+    
+    log::info!("Created Gossipsub configuration: {:?}", gossipsub_config);
 
     // Create a Gossipsub instance
     let mut gossipsub = Gossipsub::new(
@@ -40,9 +46,15 @@ pub fn new_gossipsub(
 
     // Subscribe to the state updates topic
     let topic = IdentTopic::new(STATE_UPDATES_TOPIC);
-    gossipsub
-        .subscribe(&topic)
-        .map_err(|e| NetworkError::GossipError(e.to_string()))?;
+    match gossipsub.subscribe(&topic) {
+        Ok(_) => {
+            log::info!("Successfully subscribed to topic: {}", topic);
+        },
+        Err(e) => {
+            log::error!("Failed to subscribe to topic {}: {}", topic, e);
+            return Err(NetworkError::GossipError(e.to_string()));
+        }
+    }
 
     Ok(gossipsub)
 }
@@ -52,19 +64,30 @@ pub async fn broadcast_update(
     gossipsub: &mut Gossipsub,
     update: &UpdateMsg,
 ) -> Result<(), NetworkError> {
+    log::info!("Broadcasting update message: {:?}", update);
+    
     // Serialize the update message
     let data = bincode::serialize(update)
         .map_err(|e| NetworkError::SerializationError(e.to_string()))?;
 
     // Create a topic
     let topic = IdentTopic::new(STATE_UPDATES_TOPIC);
+    log::info!("Using topic: {}", topic);
+
+    // Log mesh information
+    log::info!("Attempting to publish to topic: {}", topic);
 
     // Publish the message
-    gossipsub
-        .publish(topic, data)
-        .map_err(|e| NetworkError::GossipError(e.to_string()))?;
-
-    Ok(())
+    match gossipsub.publish(topic, data) {
+        Ok(_) => {
+            log::info!("Successfully published update message to gossip network");
+            Ok(())
+        },
+        Err(e) => {
+            log::error!("Failed to publish update message: {}", e);
+            Err(NetworkError::GossipError(e.to_string()))
+        }
+    }
 }
 
 /// Handles a Gossipsub event.
@@ -73,22 +96,50 @@ pub fn handle_gossipsub_event(
 ) -> Result<Option<UpdateMsg>, NetworkError> {
     match event {
         GossipsubEvent::Message {
-            propagation_source: _,
-            message_id: _,
+            propagation_source,
+            message_id,
             message,
         } => {
+            log::info!("Received gossip message from {}, id: {}, topic: {}",
+                      propagation_source, message_id, message.topic);
+            
             // Check if the message is on the state updates topic
             if message.topic.as_str() == STATE_UPDATES_TOPIC {
+                log::info!("Message is on state updates topic");
+                
                 // Deserialize the message
-                let update = bincode::deserialize::<UpdateMsg>(&message.data)
-                    .map_err(|e| NetworkError::SerializationError(e.to_string()))?;
-
-                Ok(Some(update))
+                match bincode::deserialize::<UpdateMsg>(&message.data) {
+                    Ok(update) => {
+                        log::info!("Successfully deserialized update message: {:?}", update);
+                        Ok(Some(update))
+                    },
+                    Err(e) => {
+                        log::error!("Failed to deserialize update message: {}", e);
+                        Err(NetworkError::SerializationError(e.to_string()))
+                    }
+                }
             } else {
+                log::debug!("Message is not on state updates topic");
                 Ok(None)
             }
         }
-        _ => Ok(None),
+        GossipsubEvent::Subscribed { peer_id, topic } => {
+            log::info!("Peer {} subscribed to topic {}", peer_id, topic);
+            Ok(None)
+        }
+        GossipsubEvent::Unsubscribed { peer_id, topic } => {
+            log::info!("Peer {} unsubscribed from topic {}", peer_id, topic);
+            Ok(None)
+        }
+        GossipsubEvent::GossipsubNotSupported { peer_id } => {
+            log::warn!("Peer {} does not support gossipsub", peer_id);
+            Ok(None)
+        }
+        #[allow(unreachable_patterns)]
+        _ => {
+            log::debug!("Received other gossipsub event");
+            Ok(None)
+        },
     }
 }
 
