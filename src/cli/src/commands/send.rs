@@ -14,6 +14,7 @@ pub async fn run<P: AsRef<Path>>(
     config: &WalletConfig,
     wallet_path: P,
     to_hex: &str,
+    token_id: u64,
     amount: u128,
 ) -> Result<String, WalletError> {
     // Load the wallet
@@ -30,26 +31,27 @@ pub async fn run<P: AsRef<Path>>(
     // Get the sender address
     let from = wallet.address()?;
     let from_hex = hex::encode(&from);
-    info!("Sending {} tokens from {} to {}", amount, from_hex, to_hex);
+    info!("Sending {} tokens with ID {} from {} to {}", amount, token_id, from_hex, to_hex);
 
     // Verify that the sender has enough balance
-    let balance = get_balance_from_node(&config.node, &from).await?;
+    let balance = get_balance_with_token_from_node(&config.node, &from, token_id).await?;
     if balance < amount {
         return Err(WalletError::InsufficientBalance(format!(
-            "Insufficient balance: {} < {}",
-            balance, amount
+            "Insufficient balance: {} < {} for token ID {}",
+            balance, amount, token_id
         )));
     }
-    debug!("Sender balance: {}", balance);
+    debug!("Sender balance for token {}: {}", token_id, balance);
 
     // Get the current nonce
-    let nonce = get_nonce_from_node(&config.node, &from).await?;
-    debug!("Sender nonce: {}", nonce);
+    let nonce = get_nonce_with_token_from_node(&config.node, &from, token_id).await?;
+    debug!("Sender nonce for token {}: {}", token_id, nonce);
 
     // Create a transaction message
     let transaction = serde_json::json!({
         "from": from_hex,
         "to": to_hex.trim_start_matches("0x"),
+        "token_id": token_id,
         "amount": amount,
         "nonce": nonce
     });
@@ -78,7 +80,7 @@ pub async fn run<P: AsRef<Path>>(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "send",
-            "params": [from_hex, to_hex, amount, nonce, signature_hex]
+            "params": [from_hex, to_hex, token_id, amount, nonce, signature_hex]
         }))
         .send()
         .await
@@ -115,7 +117,7 @@ pub async fn run<P: AsRef<Path>>(
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    Ok(format!("Successfully sent {} tokens to {}. Transaction hash: {}", amount, to_hex, tx_hash))
+    Ok(format!("Successfully sent {} tokens with ID {} to {}. Transaction hash: {}", amount, token_id, to_hex, tx_hash))
 }
 
 /// Gets the current root from the node.
@@ -454,4 +456,137 @@ async fn get_balance_from_node(node_url: &str, address: &Address) -> Result<u128
     };
 
     Ok(balance_u128)
+}
+
+/// Gets the balance for an address and token from the node.
+async fn get_balance_with_token_from_node(node_url: &str, address: &Address, token_id: u64) -> Result<u128, WalletError> {
+    // Create the JSON-RPC request
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "getBalanceWithToken",
+        "params": [hex::encode(address), token_id],
+        "id": 1
+    });
+
+    // Send the request to the node
+    // Make sure to append /rpc to the node URL
+    let rpc_url = if node_url.ends_with("/rpc") {
+        node_url.to_string()
+    } else {
+        format!("{}/rpc", node_url)
+    };
+    
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&rpc_url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| WalletError::NetworkError(e.to_string()))?;
+
+    // Get the raw response text for debugging
+    let response_text = response.text().await
+        .map_err(|e| WalletError::NetworkError(format!("Failed to get response text: {}", e)))?;
+    
+    // Print the raw response for debugging
+    println!("Raw balance response: {}", response_text);
+    
+    // If the response is empty, return an error
+    if response_text.is_empty() {
+        return Err(WalletError::NetworkError("Empty response from node".to_string()));
+    }
+    
+    // Parse the response
+    let response: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| WalletError::NetworkError(format!("Failed to parse response: {}", e)))?;
+
+    // Check for errors
+    if let Some(error) = response.get("error") {
+        if !error.is_null() {
+            return Err(WalletError::NodeRequestFailed(
+                error.to_string(),
+            ));
+        }
+    }
+
+    // Get the balance
+    let balance = response
+        .get("result")
+        .ok_or_else(|| WalletError::NodeRequestFailed(format!("No result in response: {}", response_text)))?;
+    
+    // Handle the case where result might be a number or a string
+    let balance_u128 = if balance.is_u64() {
+        balance.as_u64().unwrap() as u128
+    } else if balance.is_string() {
+        balance.as_str().unwrap().parse::<u128>()
+            .map_err(|e| WalletError::NodeRequestFailed(format!("Invalid balance string: {}", e)))?
+    } else if balance.is_null() {
+        // If result is null, return 0 as the balance
+        0
+    } else {
+        return Err(WalletError::NodeRequestFailed(format!("Invalid balance format: {}", balance)));
+    };
+
+    Ok(balance_u128)
+}
+
+/// Gets the nonce for an address and token from the node.
+async fn get_nonce_with_token_from_node(node_url: &str, address: &Address, token_id: u64) -> Result<u64, WalletError> {
+    // Create the JSON-RPC request
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "get_nonce_with_token",
+        "params": [hex::encode(address), token_id],
+        "id": 1
+    });
+
+    // Send the request to the node
+    // Make sure to append /rpc to the node URL
+    let rpc_url = if node_url.ends_with("/rpc") {
+        node_url.to_string()
+    } else {
+        format!("{}/rpc", node_url)
+    };
+    
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&rpc_url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| WalletError::NetworkError(e.to_string()))?;
+
+    // Get the raw response text for debugging
+    let response_text = response.text().await
+        .map_err(|e| WalletError::NetworkError(format!("Failed to get response text: {}", e)))?;
+    
+    // Print the raw response for debugging
+    println!("Raw nonce response: {}", response_text);
+    
+    // If the response is empty, return an error
+    if response_text.is_empty() {
+        return Err(WalletError::NetworkError("Empty response from node".to_string()));
+    }
+    
+    // Parse the response
+    let response: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| WalletError::NetworkError(format!("Failed to parse response: {}", e)))?;
+
+    // Check for errors
+    if let Some(error) = response.get("error") {
+        if !error.is_null() {
+            return Err(WalletError::NodeRequestFailed(
+                error.to_string(),
+            ));
+        }
+    }
+
+    // Get the nonce
+    let nonce = response
+        .get("result")
+        .ok_or_else(|| WalletError::NodeRequestFailed(format!("No result in response: {}", response_text)))?
+        .as_u64()
+        .ok_or_else(|| WalletError::NodeRequestFailed(format!("Invalid nonce: {}", response_text)))?;
+
+    Ok(nonce)
 }

@@ -11,6 +11,8 @@ pub struct UpdateMsg {
     pub from: Address,
     /// The recipient's address
     pub to: Address,
+    /// The token ID
+    pub token_id: u64,
     /// The amount to transfer
     pub amount: u128,
     /// The current root hash (pre-transaction)
@@ -34,6 +36,8 @@ pub struct MintMsg {
     pub from: Address,
     /// The recipient's address
     pub to: Address,
+    /// The token ID
+    pub token_id: u64,
     /// The amount to mint
     pub amount: u128,
     /// The current root hash
@@ -52,8 +56,8 @@ impl fmt::Display for MintMsg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "MintMsg {{ from: {:?}, to: {:?}, amount: {}, nonce: {} }}",
-            self.from, self.to, self.amount, self.nonce
+            "MintMsg {{ from: {:?}, to: {:?}, token_id: {}, amount: {}, nonce: {} }}",
+            self.from, self.to, self.token_id, self.amount, self.nonce
         )
     }
 }
@@ -82,8 +86,8 @@ impl fmt::Display for UpdateMsg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "UpdateMsg {{ from: {:?}, to: {:?}, amount: {}, nonce: {} }}",
-            self.from, self.to, self.amount, self.nonce
+            "UpdateMsg {{ from: {:?}, to: {:?}, token_id: {}, amount: {}, nonce: {} }}",
+            self.from, self.to, self.token_id, self.amount, self.nonce
         )
     }
 }

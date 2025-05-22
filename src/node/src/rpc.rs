@@ -113,6 +113,8 @@ async fn handle_rpc(
         "getRoot" => handle_get_root(&state),
         "getProof" => handle_get_proof(&request.params, &state),
         "getBalance" => handle_get_balance(&request.params, &state),
+        "getBalanceWithToken" => handle_get_balance_with_token(&request.params, &state),
+        "getAllBalances" => handle_get_all_balances(&request.params, &state),
         "get_peer_id" => handle_get_peer_id(&state),
         "getNonce" => handle_get_nonce(&request.params, &state),
         "broadcastUpdate" => handle_broadcast_update(&request.params, &state),
@@ -129,6 +131,7 @@ async fn handle_rpc(
         "broadcast_mint" => handle_broadcast_mint(&request.params, &state),
         "get_full_state" => handle_get_full_state(&state),
         "set_full_state" => handle_set_full_state(&request.params, &state),
+        "get_tokens" => handle_get_tokens(&state),
         _ => Err(JsonRpcError {
             code: -32601,
             message: "Method not found".to_string(),
@@ -445,6 +448,7 @@ fn handle_broadcast_update(
     let message_bytes = bincode::serialize(&network::types::UpdateMsg {
         from: update_msg.from,
         to: update_msg.to,
+        token_id: update_msg.token_id,
         amount: update_msg.amount,
         root: update_msg.root,
         post_root: update_msg.post_root,
@@ -512,12 +516,12 @@ fn handle_broadcast_update(
         let mut smt = state.smt.lock().unwrap();
         
         // Get the sender's account
-        let mut sender_account = match smt.get_account(&update_msg.from) {
+        let mut sender_account = match smt.get_account_with_token(&update_msg.from, update_msg.token_id) {
             Ok(account) => account,
             Err(_) => {
                 return Err(JsonRpcError {
                     code: -32603,
-                    message: "Sender account not found".to_string(),
+                    message: format!("Sender account not found for token ID {}", update_msg.token_id),
                     data: None,
                 });
             }
@@ -544,24 +548,24 @@ fn handle_broadcast_update(
         // Update the sender's account
         sender_account.bal -= update_msg.amount;
         sender_account.nonce += 1;
-        smt.update_account(sender_account).map_err(|e| JsonRpcError {
+        smt.update_account_with_token(sender_account, update_msg.token_id).map_err(|e| JsonRpcError {
             code: -32603,
             message: "Failed to update sender account".to_string(),
             data: Some(serde_json::to_value(e.to_string()).unwrap()),
         })?;
 
         // Get the recipient's account
-        let mut recipient_account = match smt.get_account(&update_msg.to) {
+        let mut recipient_account = match smt.get_account_with_token(&update_msg.to, update_msg.token_id) {
             Ok(account) => account,
             Err(_) => {
                 // If the recipient account doesn't exist, create a new one
-                core::types::AccountLeaf::new_empty(update_msg.to, 0)
+                core::types::AccountLeaf::new_empty(update_msg.to, update_msg.token_id)
             }
         };
 
         // Update the recipient's account
         recipient_account.bal += update_msg.amount;
-        smt.update_account(recipient_account).map_err(|e| JsonRpcError {
+        smt.update_account_with_token(recipient_account, update_msg.token_id).map_err(|e| JsonRpcError {
             code: -32603,
             message: "Failed to update recipient account".to_string(),
             data: Some(serde_json::to_value(e.to_string()).unwrap()),
@@ -1221,6 +1225,7 @@ fn handle_mint(
     let mint_msg = network::types::MintMsg {
         from,
         to,
+        token_id: 0, // Use native token (token_id = 0) for regular mint
         amount: amount as u128,
         root,
         proof_from: proof_from.clone(),
@@ -1339,6 +1344,7 @@ fn handle_broadcast_mint(
     let message_bytes = bincode::serialize(&network::types::MintMsg {
         from: message.from,
         to: message.to,
+        token_id: message.token_id,
         amount: message.amount,
         root: message.root,
         proof_from: message.proof_from.clone(),
@@ -1427,7 +1433,7 @@ fn handle_broadcast_mint(
 
         // Update the sender's account (treasury)
         sender_account.nonce += 1;
-        smt.update_account(sender_account).map_err(|e| JsonRpcError {
+        smt.update_account_with_token(sender_account, message.token_id).map_err(|e| JsonRpcError {
             code: -32603,
             message: "Failed to update sender account".to_string(),
             data: Some(serde_json::to_value(e.to_string()).unwrap()),
@@ -1446,7 +1452,7 @@ fn handle_broadcast_mint(
 
         // Update the recipient's account
         recipient_account.bal += message.amount;
-        smt.update_account(recipient_account).map_err(|e| JsonRpcError {
+        smt.update_account_with_token(recipient_account, message.token_id).map_err(|e| JsonRpcError {
             code: -32603,
             message: "Failed to update recipient account".to_string(),
             data: Some(serde_json::to_value(e.to_string()).unwrap()),
@@ -1479,10 +1485,10 @@ fn handle_send(
                     data: None,
                 })?;
         
-            if params.len() != 5 {
+            if params.len() != 6 {
                 return Err(JsonRpcError {
                     code: -32602,
-                    message: format!("Expected 5 parameters, got {}", params.len()),
+                    message: format!("Expected 6 parameters, got {}", params.len()),
                     data: None,
                 });
             }
@@ -1539,22 +1545,29 @@ fn handle_send(
             let mut to = [0u8; 32];
             to.copy_from_slice(&to_bytes);
         
+            // Parse token_id
+            let token_id = params[2].as_u64().ok_or_else(|| JsonRpcError {
+                code: -32602,
+                message: "Invalid token ID".to_string(),
+                data: None,
+            })?;
+            
             // Parse amount
-            let amount = params[2].as_u64().ok_or_else(|| JsonRpcError {
+            let amount = params[3].as_u64().ok_or_else(|| JsonRpcError {
                 code: -32602,
                 message: "Invalid amount".to_string(),
                 data: None,
             })? as u128;
         
             // Parse nonce
-            let nonce = params[3].as_u64().ok_or_else(|| JsonRpcError {
+            let nonce = params[4].as_u64().ok_or_else(|| JsonRpcError {
                 code: -32602,
                 message: "Invalid nonce".to_string(),
                 data: None,
             })?;
         
             // Parse signature
-            let signature_hex = params[4].as_str().ok_or_else(|| JsonRpcError {
+            let signature_hex = params[5].as_str().ok_or_else(|| JsonRpcError {
                 code: -32602,
                 message: "Invalid signature".to_string(),
                 data: None,
@@ -1583,6 +1596,7 @@ fn handle_send(
             let transaction = serde_json::json!({
                 "from": from_hex,
                 "to": to_hex.trim_start_matches("0x"),
+                "token_id": token_id,
                 "amount": amount,
                 "nonce": nonce
             });
@@ -1631,13 +1645,13 @@ fn handle_send(
                 let root = smt.root();
                 
                 // Generate proofs for both accounts
-                let proof_from = smt.gen_proof(&from).map_err(|e| JsonRpcError {
+                let proof_from = smt.gen_proof_with_token(&from, token_id).map_err(|e| JsonRpcError {
                     code: -32603,
                     message: "Failed to generate sender proof".to_string(),
                     data: Some(serde_json::to_value(e.to_string()).unwrap()),
                 })?;
                 
-                let proof_to = smt.gen_proof(&to).map_err(|e| JsonRpcError {
+                let proof_to = smt.gen_proof_with_token(&to, token_id).map_err(|e| JsonRpcError {
                     code: -32603,
                     message: "Failed to generate recipient proof".to_string(),
                     data: Some(serde_json::to_value(e.to_string()).unwrap()),
@@ -1651,12 +1665,12 @@ fn handle_send(
                 let mut smt = state.smt.lock().unwrap();
                 
                 // Get the sender's account
-                let mut sender_account = match smt.get_account(&from) {
+                let mut sender_account = match smt.get_account_with_token(&from, token_id) {
                     Ok(account) => account,
                     Err(_) => {
                         return Err(JsonRpcError {
                             code: -32603,
-                            message: "Sender account not found".to_string(),
+                            message: format!("Sender account not found for token ID {}", token_id),
                             data: None,
                         });
                     }
@@ -1683,7 +1697,7 @@ fn handle_send(
                 // Update the sender's account
                 sender_account.bal -= amount;
                 sender_account.nonce += 1;
-                smt.update_account(sender_account).map_err(|e| {
+                smt.update_account_with_token(sender_account, token_id).map_err(|e| {
                     JsonRpcError {
                         code: -32603,
                         message: "Failed to update sender account".to_string(),
@@ -1692,7 +1706,7 @@ fn handle_send(
                 })?;
         
                 // Get or create the recipient's account
-                let mut recipient_account = match smt.get_account(&to) {
+                let mut recipient_account = match smt.get_account_with_token(&to, token_id) {
                     Ok(account) => account,
                     Err(_) => {
                         // If the account doesn't exist, create a new one
@@ -1700,14 +1714,14 @@ fn handle_send(
                             addr: to,
                             bal: 0,
                             nonce: 0,
-                            token_id: 0, // Use native token (token_id = 0)
+                            token_id: token_id,
                         }
                     }
                 };
         
                 // Update the recipient's account
                 recipient_account.bal += amount;
-                smt.update_account(recipient_account).map_err(|e| {
+                smt.update_account_with_token(recipient_account, token_id).map_err(|e| {
                     JsonRpcError {
                         code: -32603,
                         message: "Failed to update recipient account".to_string(),
@@ -1720,6 +1734,7 @@ fn handle_send(
             let update_msg = network::types::UpdateMsg {
                 from,
                 to,
+                token_id,
                 amount,
                 root,
                 post_root: root, // Using the same root as post_root for now
@@ -1741,6 +1756,7 @@ fn handle_send(
             let mut hasher = sha2::Sha256::new();
             hasher.update(&from);
             hasher.update(&to);
+            hasher.update(&token_id.to_be_bytes());
             hasher.update(&amount.to_be_bytes());
             hasher.update(&nonce.to_be_bytes());
             hasher.update(&signature);
@@ -1890,4 +1906,224 @@ fn handle_get_full_state(state: &RpcState) -> Result<serde_json::Value, JsonRpcE
     })?;
     
     Ok(full_state_json)
+}
+
+/// Handles the getBalanceWithToken method.
+fn handle_get_balance_with_token(
+    params: &serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, JsonRpcError> {
+    // Parse parameters
+    let params = params
+        .as_array()
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Invalid params".to_string(),
+            data: None,
+        })?;
+
+    if params.len() != 2 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Invalid params".to_string(),
+            data: None,
+        });
+    }
+
+    let address_hex = params[0].as_str().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Invalid address".to_string(),
+        data: None,
+    })?;
+
+    let token_id = params[1].as_u64().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Invalid token ID".to_string(),
+        data: None,
+    })?;
+
+    // Parse address
+    let address_bytes = hex::decode(address_hex.trim_start_matches("0x")).map_err(|e| {
+        JsonRpcError {
+            code: -32602,
+            message: "Invalid address".to_string(),
+            data: Some(serde_json::to_value(e.to_string()).unwrap()),
+        }
+    })?;
+
+    if address_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Invalid address length".to_string(),
+            data: None,
+        });
+    }
+
+    let mut address = [0u8; 32];
+    address.copy_from_slice(&address_bytes);
+
+    // Get the account with the specified token
+    let balance = {
+        let mut smt = state.smt.lock().unwrap();
+        
+        // Log the request for debugging
+        info!("RPC: Getting balance for address: {:?} with token ID: {}", address, token_id);
+        
+        // Try to get the account from the SMT
+        match smt.get_account_with_token(&address, token_id) {
+            Ok(account) => {
+                info!("RPC: Found account with balance: {}", account.bal);
+                account.bal
+            },
+            Err(e) => {
+                // If the account doesn't exist, return a balance of 0
+                // This is more user-friendly than returning an error
+                warn!("RPC: Account not found: {}", e);
+                0
+            }
+        }
+    };
+
+    // Convert the balance to u64 (the CLI expects a u64)
+    let balance_u64 = if balance > u64::MAX as u128 {
+        u64::MAX // Cap at u64::MAX if the balance is too large
+    } else {
+        balance as u64
+    };
+
+    // Return the balance as a JSON number
+    Ok(serde_json::json!(balance_u64))
+}
+
+/// Handles the getAllBalances method.
+fn handle_get_all_balances(
+    params: &serde_json::Value,
+    state: &RpcState,
+) -> Result<serde_json::Value, JsonRpcError> {
+    // Parse parameters
+    let params = params
+        .as_array()
+        .ok_or_else(|| JsonRpcError {
+            code: -32602,
+            message: "Invalid params".to_string(),
+            data: None,
+        })?;
+
+    if params.len() != 1 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Invalid params".to_string(),
+            data: None,
+        });
+    }
+
+    let address_hex = params[0].as_str().ok_or_else(|| JsonRpcError {
+        code: -32602,
+        message: "Invalid address".to_string(),
+        data: None,
+    })?;
+
+    // Parse address
+    let address_bytes = hex::decode(address_hex.trim_start_matches("0x")).map_err(|e| {
+        JsonRpcError {
+            code: -32602,
+            message: "Invalid address".to_string(),
+            data: Some(serde_json::to_value(e.to_string()).unwrap()),
+        }
+    })?;
+
+    if address_bytes.len() != 32 {
+        return Err(JsonRpcError {
+            code: -32602,
+            message: "Invalid address length".to_string(),
+            data: None,
+        });
+    }
+
+    let mut address = [0u8; 32];
+    address.copy_from_slice(&address_bytes);
+
+    // Get all accounts for this address
+    let balances = {
+        let smt = state.smt.lock().unwrap();
+        
+        // Log the request for debugging
+        info!("RPC: Getting all balances for address: {:?}", address);
+        
+        // Get all accounts
+        let accounts = smt.get_all_accounts().map_err(|e| JsonRpcError {
+            code: -32603,
+            message: "Failed to get accounts".to_string(),
+            data: Some(serde_json::to_value(e.to_string()).unwrap()),
+        })?;
+        
+        // Filter accounts for this address
+        let mut balances = Vec::new();
+        for account in accounts {
+            if account.addr == address {
+                balances.push(serde_json::json!({
+                    "token_id": account.token_id,
+                    "balance": account.bal,
+                }));
+            }
+        }
+        
+        info!("RPC: Found {} token balances for address {:?}", balances.len(), address);
+        
+        balances
+    };
+
+    // Return the balances as a JSON array
+    Ok(serde_json::json!(balances))
+}
+
+/// Handles the get_tokens method.
+fn handle_get_tokens(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
+    // Get all tokens from the SMT
+    let tokens = {
+        let smt = state.smt.lock().unwrap();
+        
+        // Log the request for debugging
+        info!("RPC: Getting all tokens");
+        
+        // Get all tokens
+        let mut tokens = Vec::new();
+        
+        // Get all accounts to find all token IDs
+        let accounts = smt.get_all_accounts().map_err(|e| JsonRpcError {
+            code: -32603,
+            message: "Failed to get accounts".to_string(),
+            data: Some(serde_json::to_value(e.to_string()).unwrap()),
+        })?;
+        
+        // Extract unique token IDs
+        let mut token_ids = std::collections::HashSet::new();
+        for account in &accounts {
+            token_ids.insert(account.token_id);
+        }
+        
+        // Get token info for each token ID
+        for token_id in token_ids {
+            match smt.get_token(token_id) {
+                Ok(token_info) => {
+                    tokens.push(serde_json::json!({
+                        "token_id": token_info.token_id,
+                        "issuer": hex::encode(token_info.issuer),
+                        "metadata": token_info.metadata,
+                        "total_supply": token_info.total_supply,
+                    }));
+                },
+                Err(e) => {
+                    warn!("RPC: Failed to get token info for token ID {}: {}", token_id, e);
+                }
+            }
+        }
+        
+        info!("RPC: Found {} tokens", tokens.len());
+        
+        tokens
+    };
+
+    // Return the tokens as a JSON array
+    Ok(serde_json::json!(tokens))
 }

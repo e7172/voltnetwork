@@ -142,6 +142,7 @@ pub async fn handle_update(
     let unsigned_update = UpdateMsg {
         from: update.from,
         to: update.to,
+        token_id: update.token_id,
         amount: update.amount,
         root: update.root,
         post_root: update.post_root,
@@ -258,6 +259,7 @@ pub async fn handle_mint(
     let unsigned_mint = MintMsg {
         from: mint.from,
         to: mint.to,
+        token_id: mint.token_id,
         amount: mint.amount,
         root: mint.root,
         proof_from: mint.proof_from.clone(),

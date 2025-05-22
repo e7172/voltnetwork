@@ -50,6 +50,10 @@ enum Command {
         #[structopt(long)]
         to: String,
 
+        /// Token ID (defaults to 0 for native token)
+        #[structopt(long, default_value = "0")]
+        token_id: u64,
+
         /// Amount to send
         #[structopt(long)]
         amount: u128,
@@ -148,8 +152,8 @@ async fn main() -> Result<()> {
             let balance = balance::run(&config, &wallet_file).await?;
             println!("{} {}", "Balance:".green(), balance);
         }
-        Command::Send { to, amount } => {
-            let tx_hash = send::run(&config, &wallet_file, &to, amount).await?;
+        Command::Send { to, token_id, amount } => {
+            let tx_hash = send::run(&config, &wallet_file, &to, token_id, amount).await?;
             println!("{} {}", "Transaction sent:".green(), tx_hash);
         }
         Command::Mint { to, amount } => {

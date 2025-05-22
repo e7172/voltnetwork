@@ -31,11 +31,31 @@ pub async fn run<P: AsRef<Path>>(
     // Print the address for the user
     println!("Wallet address: 0x{}", hex::encode(&address));
 
-    // Get the balance from the node
-    let balance = get_balance_from_node(&config.node, &address).await?;
-    debug!("Balance: {}", balance);
+    // Get the native token balance from the node
+    let native_balance = get_balance_from_node(&config.node, &address).await?;
+    debug!("Native token balance: {}", native_balance);
+    
+    // Try to get all token balances
+    match get_all_balances_from_node(&config.node, &address).await {
+        Ok(balances) => {
+            println!("\nToken balances:");
+            println!("Token ID 0 (VOLT): {}", native_balance);
+            
+            for balance in balances {
+                if let (Some(token_id), Some(balance)) = (balance.get("token_id"), balance.get("balance")) {
+                    if token_id.as_u64() != Some(0) { // Skip native token as we already displayed it
+                        println!("Token ID {}: {}", token_id, balance);
+                    }
+                }
+            }
+        },
+        Err(e) => {
+            // If the getAllBalances endpoint fails, just show the native token balance
+            debug!("Failed to get all balances: {}", e);
+        }
+    }
 
-    Ok(balance)
+    Ok(native_balance)
 }
 
 /// Gets the balance for an address from the node.
@@ -108,4 +128,68 @@ async fn get_balance_from_node(node_url: &str, address: &Address) -> Result<u128
     };
 
     Ok(balance as u128)
+}
+
+/// Gets all token balances for an address from the node.
+async fn get_all_balances_from_node(node_url: &str, address: &Address) -> Result<Vec<serde_json::Value>, WalletError> {
+    // Create the JSON-RPC request
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "getAllBalances",
+        "params": [hex::encode(address)],
+        "id": 1
+    });
+
+    // Send the request to the node
+    // Make sure to append /rpc to the node URL
+    let rpc_url = if node_url.ends_with("/rpc") {
+        node_url.to_string()
+    } else {
+        format!("{}/rpc", node_url)
+    };
+    
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&rpc_url)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| WalletError::NetworkError(e.to_string()))?;
+
+    // Get the raw response text for debugging
+    let response_text = response.text().await
+        .map_err(|e| WalletError::NetworkError(format!("Failed to get response text: {}", e)))?;
+    
+    // Print the raw response for debugging
+    println!("Raw all balances response: {}", response_text);
+    
+    // If the response is empty, return an error
+    if response_text.is_empty() {
+        return Err(WalletError::NetworkError("Empty response from node".to_string()));
+    }
+    
+    // Parse the response
+    let response: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| WalletError::NetworkError(format!("Failed to parse response: {}", e)))?;
+
+    // Check for errors in the response
+    if let Some(error) = response.get("error") {
+        // Only return an error if the error is not null
+        if !error.is_null() {
+            return Err(WalletError::NodeRequestFailed(
+                error.to_string(),
+            ));
+        }
+    }
+
+    // Get the balances array
+    let result = response.get("result")
+        .ok_or_else(|| WalletError::NodeRequestFailed(format!("No result in response: {}", response_text)))?;
+    
+    // Convert to array of balances
+    if let Some(balances) = result.as_array() {
+        Ok(balances.clone())
+    } else {
+        Err(WalletError::NodeRequestFailed(format!("Invalid balances format: {}", result)))
+    }
 }
