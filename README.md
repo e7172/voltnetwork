@@ -16,7 +16,7 @@ http://3.90.180.149:8545
 
 ## PEER ID
 
-12D3KooWASqQzz3SpnuVEh7g1GFFp2Gt6pFqiF87rKMAfjpU2JYJ
+12D3KooWQLBSdMgmnicekuD8w9Lsy5CWVuNJcCBctxNeK3YsrDKF
 
 ## Features
 
@@ -60,7 +60,7 @@ mkdir -p ~/.volt/node1
 
 #2. Start the node:
 
-RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node1 --rpc-addr 0.0.0.0:8545 --listen /ip4/0.0.0.0/tcp/30333 --bootstrap /ip4/3.90.180.149/tcp/30333/p2p/12D3KooWASqQzz3SpnuVEh7g1GFFp2Gt6pFqiF87rKMAfjpU2JYJ
+RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node1 --rpc-addr 0.0.0.0:8545 --listen /ip4/0.0.0.0/tcp/30333 --bootstrap /ip4/3.90.180.149/tcp/30333/p2p/12D3KooWQLBSdMgmnicekuD8w9Lsy5CWVuNJcCBctxNeK3YsrDKF
 
 ### Using the CLI Wallet
 
