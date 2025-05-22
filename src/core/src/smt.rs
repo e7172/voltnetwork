@@ -783,6 +783,20 @@ impl SMT {
         
         // Ensure path length matches siblings length
         path.truncate(siblings.len());
+        
+        // Get the account data for inclusion in the proof
+        let account_data = self.accounts.get(&(*addr, token_id)).cloned();
+        
+        // Include the serialized account data in the proof if available
+        if let Some(account) = account_data {
+            // Serialize the account data
+            if let Ok(leaf_data) = bincode::serialize(&account) {
+                // Don't reverse the path - we want it in leaf-to-root order
+                // to match our compute_root_from_proof function
+                return Ok(Proof::new_with_data(siblings, leaf_hash, path, leaf_data));
+            }
+        }
+        
         // Don't reverse the path - we want it in leaf-to-root order
         // to match our compute_root_from_proof function
         Ok(Proof::new(siblings, leaf_hash, path))
