@@ -12,6 +12,9 @@ pub mod main {
 use anyhow::Result;
 use config::NodeConfig;
 use core::{proofs::Proof, smt::SMT, types::Address};
+use network::gossip;
+use libp2p::Swarm;
+use network::transport::NodeBehaviour;
 use errors::NodeError;
 use futures::{StreamExt, FutureExt};
 use libp2p::Multiaddr;
@@ -318,16 +321,40 @@ async fn main() -> Result<()> {
                                                     (total_balance + account.bal, std::cmp::max(highest_nonce, account.nonce))
                                                 });
                                             
-                                            // Compare states using multiple factors
-                                            let local_is_more_recent =
-                                                local_accounts.len() > full_state.accounts.len() ||
-                                                (local_accounts.len() == full_state.accounts.len() && local_highest_nonce > remote_highest_nonce) ||
-                                                (local_accounts.len() == full_state.accounts.len() &&
-                                                 local_highest_nonce == remote_highest_nonce &&
-                                                 local_total_balance >= remote_total_balance);
+                                            // Calculate metrics for both states to implement a consensus-based approach
+                                            // This aligns with Volt's architecture of maintaining a single canonical state
+                                            let (_, _, local_active_accounts) = local_accounts.iter()
+                                                .fold((0u128, 0u64, 0usize), |(total_balance, highest_nonce, active_accounts), account| {
+                                                    let active = if account.bal > 0 { 1 } else { 0 };
+                                                    (total_balance + account.bal, std::cmp::max(highest_nonce, account.nonce), active_accounts + active)
+                                                });
                                             
-                                            if local_is_more_recent {
-                                                info!("Local state appears more recent than network state. Keeping local state.");
+                                            let (_, _, remote_active_accounts) = full_state.accounts.iter()
+                                                .fold((0u128, 0u64, 0usize), |(total_balance, highest_nonce, active_accounts), account| {
+                                                    let active = if account.bal > 0 { 1 } else { 0 };
+                                                    (total_balance + account.bal, std::cmp::max(highest_nonce, account.nonce), active_accounts + active)
+                                                });
+                                            
+                                            // Calculate a consensus score for each state
+                                            // This is a weighted combination of factors that indicate state freshness
+                                            let local_score = (local_active_accounts as u128 * 10) +
+                                                             (local_highest_nonce as u128 * 100) +
+                                                             (local_total_balance / 1000);
+                                            
+                                            let remote_score = (remote_active_accounts as u128 * 10) +
+                                                              (remote_highest_nonce as u128 * 100) +
+                                                              (remote_total_balance / 1000);
+                                            
+                                            // Log detailed state information for debugging
+                                            info!("State comparison:");
+                                            info!("Local: {} accounts ({} active), {} total balance, highest nonce {}, score {}",
+                                                  local_accounts.len(), local_active_accounts, local_total_balance, local_highest_nonce, local_score);
+                                            info!("Remote: {} accounts ({} active), {} total balance, highest nonce {}, score {}",
+                                                  full_state.accounts.len(), remote_active_accounts, remote_total_balance, remote_highest_nonce, remote_score);
+                                            
+                                            // If local state has a higher score, keep it
+                                            if local_score >= remote_score {
+                                                info!("Local state has higher consensus score. Keeping local state.");
                                                 break;
                                             }
                                             
@@ -435,23 +462,40 @@ async fn main() -> Result<()> {
                                                         (total_balance + account.bal, std::cmp::max(highest_nonce, account.nonce))
                                                     });
                                                 
-                                                // Compare states using multiple factors
-                                                let local_is_more_recent =
-                                                    // If local has more accounts, it's likely more recent
-                                                    local_accounts.len() > full_state.accounts.len() ||
-                                                    // If account counts are equal, compare by highest nonce
-                                                    (local_accounts.len() == full_state.accounts.len() && local_highest_nonce > remote_highest_nonce) ||
-                                                    // If nonces are equal too, compare by total balance
-                                                    (local_accounts.len() == full_state.accounts.len() &&
-                                                     local_highest_nonce == remote_highest_nonce &&
-                                                     local_total_balance >= remote_total_balance);
+                                                // Calculate metrics for both states to implement a consensus-based approach
+                                                // This aligns with Volt's architecture of maintaining a single canonical state
+                                                let (_, _, local_active_accounts) = local_accounts.iter()
+                                                    .fold((0u128, 0u64, 0usize), |(total_balance, highest_nonce, active_accounts), account| {
+                                                        let active = if account.bal > 0 { 1 } else { 0 };
+                                                        (total_balance + account.bal, std::cmp::max(highest_nonce, account.nonce), active_accounts + active)
+                                                    });
                                                 
-                                                if local_is_more_recent {
-                                                    info!("Local state appears more recent than network state. Keeping local state.");
-                                                    info!("Local: {} accounts, {} total balance, nonce {}",
-                                                          local_accounts.len(), local_total_balance, local_highest_nonce);
-                                                    info!("Remote: {} accounts, {} total balance, nonce {}",
-                                                          full_state.accounts.len(), remote_total_balance, remote_highest_nonce);
+                                                let (_, _, remote_active_accounts) = full_state.accounts.iter()
+                                                    .fold((0u128, 0u64, 0usize), |(total_balance, highest_nonce, active_accounts), account| {
+                                                        let active = if account.bal > 0 { 1 } else { 0 };
+                                                        (total_balance + account.bal, std::cmp::max(highest_nonce, account.nonce), active_accounts + active)
+                                                    });
+                                                
+                                                // Calculate a consensus score for each state
+                                                // This is a weighted combination of factors that indicate state freshness
+                                                let local_score = (local_active_accounts as u128 * 10) +
+                                                                 (local_highest_nonce as u128 * 100) +
+                                                                 (local_total_balance / 1000);
+                                                
+                                                let remote_score = (remote_active_accounts as u128 * 10) +
+                                                                  (remote_highest_nonce as u128 * 100) +
+                                                                  (remote_total_balance / 1000);
+                                                
+                                                // Log detailed state information for debugging
+                                                info!("State comparison:");
+                                                info!("Local: {} accounts ({} active), {} total balance, highest nonce {}, score {}",
+                                                      local_accounts.len(), local_active_accounts, local_total_balance, local_highest_nonce, local_score);
+                                                info!("Remote: {} accounts ({} active), {} total balance, highest nonce {}, score {}",
+                                                      full_state.accounts.len(), remote_active_accounts, remote_total_balance, remote_highest_nonce, remote_score);
+                                                
+                                                // If local state has a higher score, keep it
+                                                if local_score >= remote_score {
+                                                    info!("Local state has higher consensus score. Keeping local state.");
                                                     break;
                                                 }
                                                 
@@ -695,7 +739,7 @@ async fn main() -> Result<()> {
                 info!("Received update from network: from={:?}, to={:?}, amount={}",
                       update.from, update.to, update.amount);
                 
-                match handle_update(update, &smt, &proof_store).await {
+                match handle_update(update, &smt, &proof_store, &swarm_mutex).await {
                     Ok(_) => info!("Successfully processed update from network"),
                     Err(e) => error!("Failed to process update from network: {}", e),
                 }
@@ -738,6 +782,7 @@ pub async fn handle_update(
     update: UpdateMsg,
     smt: &Arc<Mutex<SMT>>,
     proof_store: &ProofStore,
+    swarm_mutex: &Arc<Mutex<Swarm<NodeBehaviour>>>,
 ) -> Result<(), NodeError> {
     debug!("Received update: {}", update);
     metrics::UPDATE_COUNTER.inc();
@@ -750,18 +795,54 @@ pub async fn handle_update(
     // Flag to skip the normal transfer and go directly to storing proofs
     let mut goto_store_proofs = false;
 
+    // Get the local root for comparison
+    let local_root = {
+        let smt_lock = smt.lock().unwrap();
+        smt_lock.root()
+    };
+    
+    // Log the roots for debugging
+    debug!("Local root: {:?}, Update root: {:?}", local_root, root);
+
     // Verify the sender's proof
     if !update.proof_from.verify(root, &update.from) {
-        let local_root = {
-            let smt_lock = smt.lock().unwrap();
-            smt_lock.root()
-        };
-        
         error!("Failed to verify sender proof. Local root: {:?}, Update root: {:?}", local_root, root);
         
         // If the roots are different, try to sync state
         if local_root != root {
             info!("Roots are different. Attempting to sync state...");
+            
+            // Get the current state metrics for both local and update states
+            let (local_metrics, update_metrics) = {
+                let smt_lock = smt.lock().unwrap();
+                let local_accounts = smt_lock.get_all_accounts().unwrap_or_default();
+                
+                // Find the sender account in the local state
+                let local_sender = local_accounts.iter()
+                    .find(|acc| acc.addr == update.from)
+                    .cloned();
+                
+                // Calculate local metrics
+                let local_nonce = local_sender.as_ref().map_or(0, |acc| acc.nonce);
+                let local_balance = local_sender.as_ref().map_or(0, |acc| acc.bal);
+                
+                // Calculate update metrics
+                let update_nonce = update.nonce;
+                
+                ((local_nonce, local_balance), (update_nonce, update.amount))
+            };
+            
+            // Log the metrics for debugging
+            info!("Local sender: nonce={}, balance={}", local_metrics.0, local_metrics.1);
+            info!("Update: nonce={}, amount={}", update_metrics.0, update_metrics.1);
+            
+            // If the update nonce is higher than our local nonce, it's likely more recent
+            // This is a key part of the consensus mechanism - higher nonces indicate newer state
+            if update_metrics.0 > local_metrics.0 {
+                info!("Update nonce is higher than local nonce. Accepting update as more recent.");
+            } else {
+                info!("Update nonce is not higher than local nonce. Proceeding with normal state sync.");
+            }
             
             // Force update the accounts based on the transaction
             {
@@ -961,11 +1042,40 @@ pub async fn handle_update(
         // State is automatically persisted to RocksDB by the transfer method
     }
 
-    // Store the updated proofs
-    let new_root = {
+    // Store the updated proofs and broadcast the full state to ensure all nodes are in sync
+    let (new_root, accounts) = {
         let smt = smt.lock().unwrap();
-        smt.root()
+        let root = smt.root();
+        let accounts = smt.get_all_accounts().unwrap_or_default();
+        (root, accounts)
     };
+    
+    // Create a full state object for broadcasting
+    let full_state = rpc::FullState {
+        accounts,
+        root: new_root,
+    };
+    
+    // Broadcast the full state to ensure all nodes are in sync
+    // This is especially important after processing a transaction
+    info!("Broadcasting full state after transaction to ensure network consistency");
+    
+    // Queue the full state for broadcast in the next gossip cycle
+    if let Ok(state_json) = serde_json::to_string(&full_state) {
+        // Use the STATE_SYNC_TOPIC for full state synchronization
+        let mut swarm = swarm_mutex.lock().unwrap();
+        let topic = libp2p::gossipsub::IdentTopic::new(gossip::STATE_UPDATES_TOPIC);
+        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(
+            topic,
+            state_json.as_bytes(),
+        ) {
+            error!("Failed to broadcast full state: {}", e);
+        } else {
+            info!("Successfully queued full state for broadcast");
+        }
+    } else {
+        error!("Failed to serialize full state for broadcast");
+    }
 
     // Generate and store new proofs
     {
