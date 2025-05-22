@@ -33,7 +33,19 @@ pub enum NodeError {
     Unauthorized(String),
     
     /// Error when a nonce is invalid.
-    InvalidNonce(String),
+    InvalidNonce,
+    
+    /// Error when an account has insufficient balance.
+    InsufficientBalance,
+    
+    /// Error when an account is not found.
+    AccountNotFound(String),
+    
+    /// Error when an update operation fails.
+    UpdateFailed(String),
+    
+    /// Error when state roots don't match.
+    StateMismatch(String),
 }
 
 impl fmt::Display for NodeError {
@@ -44,10 +56,14 @@ impl fmt::Display for NodeError {
             NodeError::RpcError(msg) => write!(f, "RPC error: {}", msg),
             NodeError::MetricsError(msg) => write!(f, "Metrics error: {}", msg),
             NodeError::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
-            NodeError::InvalidProof(msg) => write!(f, "Invalid proof for {}", msg),
+            NodeError::InvalidProof(msg) => write!(f, "Invalid proof: {}", msg),
             NodeError::InvalidSignature(msg) => write!(f, "Invalid signature: {}", msg),
             NodeError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
-            NodeError::InvalidNonce(msg) => write!(f, "Invalid nonce: {}", msg),
+            NodeError::InvalidNonce => write!(f, "Invalid nonce"),
+            NodeError::InsufficientBalance => write!(f, "Insufficient balance"),
+            NodeError::AccountNotFound(msg) => write!(f, "Account not found: {}", msg),
+            NodeError::UpdateFailed(msg) => write!(f, "Update failed: {}", msg),
+            NodeError::StateMismatch(msg) => write!(f, "State mismatch: {}", msg),
         }
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::errors::CoreError;
 use crate::proofs::Proof;
-use crate::types::{AccountLeaf, Address, Balance, TokenId, TokenInfo, SystemMsg, Signature};
+use crate::types::{AccountLeaf, Address, Balance, TokenId, TokenInfo, SystemMsg};
 use byteorder::{ByteOrder, LittleEndian};
 use rocksdb::{IteratorMode, DB};
 use serde::{Deserialize, Serialize};
@@ -14,8 +14,7 @@ use sparse_merkle_tree::{
 };
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::{info, warn, error, debug};
 
 /// SHA-256 hasher for the Sparse Merkle Tree.
@@ -624,7 +623,7 @@ impl SMT {
         amount: Balance,
         nonce: u64,
         max_supply: Balance,
-        current_supply: Balance,
+        _current_supply: Balance,
     ) -> Result<Balance, CoreError> {
         // Default to native token (token_id = 0)
         self.mint_token_with_max_supply(treasury, to, self.native_token_id, amount, nonce, max_supply)
@@ -789,7 +788,7 @@ impl SMT {
         };
 
         // Convert SMT proof to our Proof format
-        let siblings: Vec<[u8; 32]> = smt_proof
+        let mut siblings: Vec<[u8; 32]> = smt_proof
             .merkle_path()
             .iter()
             .map(|h| {
@@ -807,20 +806,18 @@ impl SMT {
             })
             .collect();
 
-        // For testing purposes, if siblings is empty, create a dummy sibling
-        // This is a workaround for the sparse-merkle-tree crate's behavior
-        let siblings = if siblings.is_empty() {
-            // Create a single dummy sibling
-            vec![[0u8; 32]]
-        } else {
-            siblings
-        };
-
-        // Convert address to path
-        let mut path = addr_to_path(addr);
+        // Convert address to path using bitvec for efficient storage
+        // Use the address_to_path function from proofs.rs
+        let path = crate::proofs::address_to_path(addr);
         
-        // Ensure path length matches siblings length
-        path.truncate(siblings.len());
+        // Calculate zeros_omitted - the number of trailing zero siblings that can be omitted
+        // In production, we need to ensure the proof is complete for all 256 levels
+        let mut zeros_omitted = 0u16;
+        
+        // If we have fewer than 256 siblings, the rest are considered omitted zeros
+        if siblings.len() < 256 {
+            zeros_omitted = (256 - siblings.len()) as u16;
+        }
         
         // Get the account data for inclusion in the proof
         let account_data = self.accounts.get(&(*addr, token_id)).cloned();
@@ -829,15 +826,13 @@ impl SMT {
         if let Some(account) = account_data {
             // Serialize the account data
             if let Ok(leaf_data) = bincode::serialize(&account) {
-                // Don't reverse the path - we want it in leaf-to-root order
-                // to match our compute_root_from_proof function
-                return Ok(Proof::new_with_data(siblings, leaf_hash, path, leaf_data));
+                // Create a proof with the complete path and zeros_omitted count
+                return Ok(Proof::new_with_data(siblings, leaf_hash, path, zeros_omitted, leaf_data));
             }
         }
         
-        // Don't reverse the path - we want it in leaf-to-root order
-        // to match our compute_root_from_proof function
-        Ok(Proof::new(siblings, leaf_hash, path))
+        // Create a proof with the complete path and zeros_omitted count
+        Ok(Proof::new(siblings, leaf_hash, path, zeros_omitted))
     }
 
     /// Gets an account leaf from the tree.
@@ -954,6 +949,19 @@ impl SMT {
     pub fn set_full_state(&mut self, accounts: Vec<AccountLeaf>, root: [u8; 32]) -> Result<(), CoreError> {
         info!("Setting full state with {} accounts and root {:?}", accounts.len(), root);
         
+        // First, rebuild the in-memory state
+        self.rebuild_from(accounts.clone(), root)?;
+        
+        // Then, atomically persist to RocksDB if available
+        if let Some(db) = &self.db {
+            self.atomic_persist_state(accounts, root, db)?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Rebuilds the in-memory state from the given accounts and root
+    fn rebuild_from(&mut self, accounts: Vec<AccountLeaf>, root: [u8; 32]) -> Result<(), CoreError> {
         // Clear existing data
         self.accounts.clear();
         self.tree = SMTree::default();
@@ -975,103 +983,63 @@ impl SMT {
             let leaf_hash = leaf.hash();
             let value_h256 = H256::from(leaf_hash);
             
-            // Update the tree - in production, we continue even if an update fails
-            match self.tree.update(addr_h256, value_h256) {
-                Ok(_) => {
-                    debug!("Successfully updated tree for account: {:?}", leaf.addr);
-                },
-                Err(e) => {
-                    error!("Failed to update tree for account: {:?}, error: {}", leaf.addr, e);
-                    // In production, we continue with other accounts
-                }
-            }
+            // Update the tree - in production, we need to ensure all updates succeed
+            self.tree.update(addr_h256, value_h256)
+                .map_err(|e| CoreError::SMTError(format!("Failed to update tree: {}", e)))?;
+            
+            debug!("Successfully updated tree for account: {:?}", leaf.addr);
         }
         
-        // Persist to RocksDB if available
-        if let Some(db) = &self.db {
-            // Clear existing data in DB
-            info!("Clearing existing state in RocksDB before setting new state");
+        Ok(())
+    }
+    
+    /// Atomically persists the state to RocksDB using a WriteBatch
+    fn atomic_persist_state(&self, accounts: Vec<AccountLeaf>, root: [u8; 32], db: &DB) -> Result<(), CoreError> {
+        use rocksdb::WriteBatch;
+        
+        info!("Atomically persisting state to RocksDB");
+        
+        // Create a write batch for atomic operations
+        let mut batch = WriteBatch::default();
+        
+        // 1. Delete all existing account entries
+        let cf_leaves = db.cf_handle("leaves").ok_or_else(|| {
+            CoreError::SMTError("Column family 'leaves' not found".to_string())
+        })?;
+        
+        // Get all keys in the leaves column family
+        let iter = db.iterator_cf(&cf_leaves, IteratorMode::Start);
+        for result in iter {
+            let (key, _) = result.map_err(|e| {
+                CoreError::SMTError(format!("Failed to iterate over leaves: {}", e))
+            })?;
             
-            // Clear accounts - in production, we handle errors gracefully
-            let account_prefix = ACCOUNT_PREFIX.as_bytes();
-            let mut keys_to_delete = Vec::new();
-            
-            // Try to get all account keys
-            let iter = db.iterator(IteratorMode::From(account_prefix, rocksdb::Direction::Forward));
-            for item in iter {
-                match item {
-                    Ok((key, _)) => {
-                        let key_str = String::from_utf8_lossy(&key);
-                        if !key_str.starts_with(ACCOUNT_PREFIX) {
-                            break;
-                        }
-                        keys_to_delete.push(key.to_vec());
-                    },
-                    Err(e) => {
-                        error!("Error iterating RocksDB: {}", e);
-                        // Continue with other keys in production
-                    }
-                }
-            }
-            
-            // Delete all account keys
-            let mut delete_errors = 0;
-            for key in keys_to_delete {
-                if let Err(e) = db.delete(&key) {
-                    error!("Failed to delete account key: {}", e);
-                    delete_errors += 1;
-                    // Continue with other keys in production
-                }
-            }
-            
-            if delete_errors > 0 {
-                warn!("Failed to delete {} account keys during state sync", delete_errors);
-            }
-            
-            // Persist the new root
-            match bincode::serialize(&self.root) {
-                Ok(serialized) => {
-                    if let Err(e) = db.put(ROOT_KEY, serialized) {
-                        error!("Failed to persist root to RocksDB: {}", e);
-                        // Continue in production
-                    } else {
-                        info!("Successfully persisted root to RocksDB");
-                    }
-                },
-                Err(e) => {
-                    error!("Failed to serialize root: {}", e);
-                    // Continue in production
-                }
-            }
-            
-            // Persist all accounts
-            let mut persist_errors = 0;
-            for ((addr, token_id), leaf) in &self.accounts {
-                let account_key = format!("{}{:?}:{}", ACCOUNT_PREFIX, addr, token_id);
-                match bincode::serialize(leaf) {
-                    Ok(serialized) => {
-                        if let Err(e) = db.put(account_key.as_bytes(), serialized) {
-                            error!("Failed to persist account {:?} to RocksDB: {}", addr, e);
-                            persist_errors += 1;
-                            // Continue with other accounts in production
-                        }
-                    },
-                    Err(e) => {
-                        error!("Failed to serialize account {:?}: {}", addr, e);
-                        persist_errors += 1;
-                        // Continue with other accounts in production
-                    }
-                }
-            }
-            
-            if persist_errors > 0 {
-                warn!("Failed to persist {} accounts during state sync", persist_errors);
-                // Continue in production
-            } else {
-                info!("Successfully persisted all {} accounts to RocksDB", self.accounts.len());
-            }
+            // Delete the key from the batch
+            batch.delete_cf(&cf_leaves, &key);
         }
         
+        // 2. Add all new account entries
+        for leaf in &accounts {
+            let key = compute_leaf_key(&leaf.addr, leaf.token_id);
+            let serialized = bincode::serialize(leaf)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?;
+            
+            batch.put_cf(&cf_leaves, key.as_ref(), &serialized);
+        }
+        
+        // 3. Update the root (do this last so readers never see a half-applied state)
+        let cf_meta = db.cf_handle("meta").ok_or_else(|| {
+            CoreError::SMTError("Column family 'meta' not found".to_string())
+        })?;
+        
+        batch.put_cf(&cf_meta, ROOT_KEY, &root);
+        
+        // 4. Write the batch atomically
+        db.write(batch).map_err(|e| {
+            CoreError::SMTError(format!("Failed to write batch to RocksDB: {}", e))
+        })?;
+        
+        info!("Successfully persisted state to RocksDB atomically");
         Ok(())
     }
     
@@ -1167,7 +1135,7 @@ impl SMT {
                 }
                 
                 // Register the new token
-                let token_id = self.register_token(&issuer, metadata)?;
+                let _token_id = self.register_token(&issuer, metadata)?;
                 
                 // Update issuer account (increment nonce)
                 let new_issuer = AccountLeaf::new(

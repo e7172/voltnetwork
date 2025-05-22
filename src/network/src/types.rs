@@ -13,8 +13,10 @@ pub struct UpdateMsg {
     pub to: Address,
     /// The amount to transfer
     pub amount: u128,
-    /// The current root hash
+    /// The current root hash (pre-transaction)
     pub root: [u8; 32],
+    /// The expected root hash after the transaction is applied
+    pub post_root: [u8; 32],
     /// The proof for the sender's account
     pub proof_from: Proof,
     /// The proof for the recipient's account
