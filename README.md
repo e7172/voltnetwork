@@ -1,6 +1,6 @@
 # Volt: Chainless Token Transfer Network
 
-![Volt Network Cover](cover.png)
+![Volt Network Cover](volt-cover.png)
 
 Volt is a novel decentralized protocol enabling instant, feeless, and privacy-preserving asset transfers without a global blockchain ledger. Leveraging Sparse Merkle Trees (SMTs) for cryptographic proofs and Distributed Hash Tables (DHTs) for peer-to-peer data storage and retrieval, Volt reduces network overhead, eliminates transaction fees, and enhances user privacy.
 
@@ -16,7 +16,7 @@ http://3.90.180.149:8545
 
 ## PEER ID
 
-12D3KooWAgo2VzYHMxvkj2mdRbTvk2inbcUj3RYAjTwxYh1fKUsA
+12D3KooWASqQzz3SpnuVEh7g1GFFp2Gt6pFqiF87rKMAfjpU2JYJ
 
 ## Features
 
@@ -58,11 +58,9 @@ To initialize the network:
 mkdir -p ~/.volt/node1
 ```
 
-./target/release/cli --node http://127.0.0.1:8545 send --to 0x1234567890123456789012345678901234567890123456789012345678901234 --amount 25
+#2. Start the node:
 
-RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node2 --rpc-addr 127.0.0.1:8546 --listen /ip4/0.0.0.0/tcp/30334 --bootstrap /ip4/127.0.0.1/tcp/30333/p2p/12D3KooWFLgDCWydALF2UWshhHTcGNfNJCCrQGg6hmJd35BsPnPf
-
-RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node1 --rpc-addr 0.0.0.0:8545 --listen /ip4/0.0.0.0/tcp/30333 --bootstrap /ip4/3.90.180.149/tcp/30333/p2p/12D3KooWRnHujasvH4mk62xyJuf8msEgAkmBowW8HvU3wkJuvArX
+RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node1 --rpc-addr 0.0.0.0:8545 --listen /ip4/0.0.0.0/tcp/30333 --bootstrap /ip4/3.90.180.149/tcp/30333/p2p/12D3KooWASqQzz3SpnuVEh7g1GFFp2Gt6pFqiF87rKMAfjpU2JYJ
 
 ### Using the CLI Wallet
 
@@ -134,10 +132,7 @@ cargo build --release
 
 # Start nodes
 
-RUST_LOG=debug cargo run --bin cli -- mint-token --token-id 4 --to dcc80a50e84955049514913bd424ce6cbdff2bca048c612ab9eecbc7d703fa7e --amount 100
-
 RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node1 --rpc-addr 127.0.0.1:8545 --listen /ip4/0.0.0.0/tcp/30333
-RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node2 --rpc-addr 127.0.0.1:8546 --listen /ip4/0.0.0.0/tcp/30334 --bootstrap /ip4/127.0.0.1/tcp/30333
 
 # Check balances
 
