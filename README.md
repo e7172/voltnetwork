@@ -6,6 +6,10 @@ Volt is a novel decentralized protocol enabling instant, feeless, and privacy-pr
 
 **Website:** [https://voltnetwork.org](https://voltnetwork.org)
 
+**Wallet:** [https://app.voltnetwork.org/](https://app.voltnetwork.org/)
+
+**Join our Discord:** [https://discord.gg/NcKvqbwg](https://discord.gg/NcKvqbwg)
+
 This architecture provides stateless verification and scalability while maintaining robust security and data integrity guarantees.
 
 Currently, Volt is under active development and in Beta phase. We are actively seeking early adopters and contributors to help shape the future of Volt.
@@ -125,21 +129,3 @@ Note: Only the token issuer can mint new tokens.
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-# Build the project
-
-cargo build --release
-
-# Start nodes
-
-RUST_LOG=debug ./target/release/node --rpc --data-dir ~/.volt/node1 --rpc-addr 127.0.0.1:8545 --listen /ip4/0.0.0.0/tcp/30333
-
-# Check balances
-
-./target/release/cli --node http://127.0.0.1:8545 balance
-./target/release/cli --node http://3.90.180.149:8545 balance
-./target/release/cli --node http://127.0.0.1:8546 balance
-
-# Make transactions
-
-./target/release/cli --node http://127.0.0.1:8545 send --to 9cb7172568195016efbb0a4c1db3fd2f85eb00c02ccdfc6aff1f08901bec56c3 --amount 25
