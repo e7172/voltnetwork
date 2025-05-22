@@ -13,9 +13,11 @@ sparse-merkle-tree.workspace = true
 byteorder.workspace = true
 thiserror.workspace = true
 log.workspace = true
+tracing.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 bincode.workspace = true
+rocksdb = "0.21"
 
 [dev-dependencies]
 rand = "0.8.5"

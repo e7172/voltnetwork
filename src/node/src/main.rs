@@ -102,42 +102,31 @@ async fn main() -> Result<()> {
     proof_store_path.push("proofs");
     let proof_store = ProofStore::new(proof_store_path)?;
 
-    // Path for SMT state file
-    let mut smt_state_path = data_dir.clone();
-    smt_state_path.push("smt_state.json");
+    // Path for SMT RocksDB
+    let mut smt_db_path = data_dir.clone();
+    smt_db_path.push("smt_db");
 
-    // Initialize SMT - either load from file or create new
-    let smt = if smt_state_path.exists() {
-        info!("Loading SMT state from {}", smt_state_path.display());
-        match SMT::load_from_file(&smt_state_path) {
-            Ok(loaded_smt) => {
-                info!("SMT state loaded successfully");
-                Arc::new(Mutex::new(loaded_smt))
-            }
-            Err(e) => {
-                warn!("Failed to load SMT state: {}, creating new", e);
-                Arc::new(Mutex::new(SMT::new_zero()))
-            }
+    // Initialize RocksDB for SMT
+    info!("Opening RocksDB for SMT at {}", smt_db_path.display());
+    let mut opts = rocksdb::Options::default();
+    opts.create_if_missing(true);
+    let db = Arc::new(rocksdb::DB::open(&opts, smt_db_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open RocksDB: {}", e))?);
+
+    // Initialize SMT - either load from RocksDB or create new
+    let smt = match SMT::load_from_db(db.clone()) {
+        Ok(loaded_smt) => {
+            info!("SMT state loaded successfully from RocksDB");
+            Arc::new(Mutex::new(loaded_smt))
         }
-    } else {
-        info!("No existing SMT state found, creating new");
-        Arc::new(Mutex::new(SMT::new_zero()))
+        Err(e) => {
+            warn!("Failed to load SMT state from RocksDB: {}, creating new", e);
+            Arc::new(Mutex::new(SMT::new_with_db(db.clone())))
+        }
     };
 
-    // Set up periodic state saving
-    let smt_clone_for_saving = smt.clone();
-    let smt_state_path_clone = smt_state_path.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60)); // Save every minute
-        loop {
-            interval.tick().await;
-            info!("Saving SMT state to {}", smt_state_path_clone.display());
-            match smt_clone_for_saving.lock().unwrap().save_to_file(&smt_state_path_clone) {
-                Ok(_) => info!("SMT state saved successfully"),
-                Err(e) => error!("Failed to save SMT state: {}", e),
-            }
-        }
-    });
+    // No need for periodic state saving as RocksDB persists changes immediately
+    info!("Using RocksDB for SMT state persistence (automatic saving)");
 
     // Parse bootstrap nodes
     let bootstrap_nodes: Vec<Multiaddr> = opt
@@ -214,10 +203,7 @@ async fn main() -> Result<()> {
                                                 match smt_lock.set_full_state(full_state.accounts, full_state.root) {
                                                     Ok(_) => {
                                                         info!("Successfully synced state from bootstrap node");
-                                                        // Save the state immediately
-                                                        if let Err(e) = smt_lock.save_to_file(&smt_state_path) {
-                                                            warn!("Failed to save synced state: {}", e);
-                                                        }
+                                                        // State is automatically persisted to RocksDB by set_full_state
                                                         break; // Successfully synced, no need to try other nodes
                                                     }
                                                     Err(e) => {
@@ -477,8 +463,7 @@ pub async fn handle_update(
         let mut smt = smt.lock().unwrap();
         smt.transfer(&update.from, &update.to, update.amount, update.nonce)?;
         
-        // The sync_for_persistence is called inside transfer, but we'll ensure it's saved
-        smt.sync_for_persistence();
+        // State is automatically persisted to RocksDB by the transfer method
     }
 
     // Store the updated proofs

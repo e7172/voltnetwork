@@ -4,6 +4,7 @@ use crate::errors::CoreError;
 use crate::proofs::Proof;
 use crate::types::{AccountLeaf, Address, Balance, TokenId, TokenInfo, SystemMsg, Signature};
 use byteorder::{ByteOrder, LittleEndian};
+use rocksdb::{IteratorMode, DB};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sparse_merkle_tree::{
@@ -13,6 +14,9 @@ use sparse_merkle_tree::{
 };
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use tracing::{info, warn, error};
 
 /// SHA-256 hasher for the Sparse Merkle Tree.
 #[derive(Default)]
@@ -73,11 +77,16 @@ pub struct SMT {
     next_token_id: TokenId,
     /// The native token ID (always 0)
     pub native_token_id: TokenId,
-    /// Serializable accounts for persistence
-    pub serialized_accounts: Vec<(Address, TokenId, AccountLeaf)>,
-    /// Serializable token registry for persistence
-    pub serialized_tokens: Vec<(TokenId, TokenInfo)>,
+    /// RocksDB instance for persistence
+    #[serde(skip)]
+    db: Option<Arc<DB>>,
 }
+
+/// Constants for RocksDB keys
+const ROOT_KEY: &[u8] = b"root";
+const ACCOUNT_PREFIX: &str = "account::";
+const TOKEN_PREFIX: &str = "token::";
+const NEXT_TOKEN_ID_KEY: &[u8] = b"next_token_id";
 
 impl Clone for SMT {
     fn clone(&self) -> Self {
@@ -109,6 +118,11 @@ impl Clone for SMT {
 
             // Ignore errors during cloning
             let _ = smt.tree.update(addr_h256, value_h256);
+        }
+
+        // Share the same DB reference if available
+        if let Some(db) = &self.db {
+            smt.db = Some(Arc::clone(db));
         }
 
         smt
@@ -146,8 +160,7 @@ impl SMT {
             root,
             next_token_id: 1, // Start from 1, 0 is reserved for the native token
             native_token_id: 0,
-            serialized_accounts: Vec::new(),
-            serialized_tokens: Vec::new(),
+            db: None,
         };
         
         // Initialize the native token
@@ -159,78 +172,148 @@ impl SMT {
         };
         
         // Add the native token to the registry
-        smt.token_registry.insert(0, native_token.clone());
-        smt.serialized_tokens.push((0, native_token));
+        smt.token_registry.insert(0, native_token);
         
         smt
     }
 
-    /// Synchronizes the in-memory data structures with the serializable fields.
-    pub fn sync_for_persistence(&mut self) {
-        // Sync accounts
-        self.serialized_accounts.clear();
-        for ((addr, token_id), leaf) in &self.accounts {
-            self.serialized_accounts.push((*addr, *token_id, leaf.clone()));
+    /// Creates a new empty Sparse Merkle Tree with a RocksDB instance.
+    pub fn new_with_db(db: Arc<DB>) -> Self {
+        let mut smt = Self::new_zero();
+        smt.db = Some(db);
+        
+        // Persist the initial state to RocksDB
+        if let Err(e) = smt.persist_to_db() {
+            error!("Failed to persist initial state to RocksDB: {}", e);
         }
-
-        // Sync token registry
-        self.serialized_tokens.clear();
-        for (token_id, info) in &self.token_registry {
-            self.serialized_tokens.push((*token_id, info.clone()));
-        }
+        
+        smt
     }
 
-    /// Loads the state from the serializable fields.
-    pub fn load_from_persistence(&mut self) {
-        // Clear existing data
-        self.accounts.clear();
-        self.token_registry.clear();
-        self.tree = SMTree::default();
+    /// Persists the current state to RocksDB.
+    fn persist_to_db(&self) -> Result<(), CoreError> {
+        let db = self.db.as_ref().ok_or_else(|| CoreError::SMTError("No DB instance available".to_string()))?;
+        
+        // Persist the root
+        db.put(ROOT_KEY, bincode::serialize(&self.root)
+            .map_err(|e| CoreError::SerializationError(e.to_string()))?)
+            .map_err(|e| CoreError::SMTError(format!("Failed to persist root: {}", e)))?;
+        
+        // Persist the next token ID
+        db.put(NEXT_TOKEN_ID_KEY, bincode::serialize(&self.next_token_id)
+            .map_err(|e| CoreError::SerializationError(e.to_string()))?)
+            .map_err(|e| CoreError::SMTError(format!("Failed to persist next token ID: {}", e)))?;
+        
+        // Persist accounts
+        for ((addr, token_id), leaf) in &self.accounts {
+            let key = format!("{}{:?}:{}", ACCOUNT_PREFIX, addr, token_id);
+            db.put(key.as_bytes(), bincode::serialize(leaf)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?)
+                .map_err(|e| CoreError::SMTError(format!("Failed to persist account: {}", e)))?;
+        }
+        
+        // Persist tokens
+        for (token_id, info) in &self.token_registry {
+            let key = format!("{}{}", TOKEN_PREFIX, token_id);
+            db.put(key.as_bytes(), bincode::serialize(info)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?)
+                .map_err(|e| CoreError::SMTError(format!("Failed to persist token: {}", e)))?;
+        }
+        
+        Ok(())
+    }
 
+    /// Loads the SMT state from RocksDB.
+    pub fn load_from_db(db: Arc<DB>) -> Result<Self, CoreError> {
+        let mut smt = Self::new_zero();
+        smt.db = Some(Arc::clone(&db));
+        
+        // Load the root
+        if let Some(root_bytes) = db.get(ROOT_KEY)
+            .map_err(|e| CoreError::SMTError(format!("Failed to get root: {}", e)))?
+        {
+            let root: [u8; 32] = bincode::deserialize(&root_bytes)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?;
+            smt.root.copy_from_slice(&root);
+        } else {
+            info!("No root found in DB, using default");
+        }
+        
+        // Load the next token ID
+        if let Some(next_token_id_bytes) = db.get(NEXT_TOKEN_ID_KEY)
+            .map_err(|e| CoreError::SMTError(format!("Failed to get next token ID: {}", e)))?
+        {
+            smt.next_token_id = bincode::deserialize(&next_token_id_bytes)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?;
+        } else {
+            info!("No next token ID found in DB, using default");
+        }
+        
         // Load accounts
-        for (addr, token_id, leaf) in &self.serialized_accounts {
-            self.accounts.insert((*addr, *token_id), leaf.clone());
+        let account_prefix = ACCOUNT_PREFIX.as_bytes();
+        let iter = db.iterator(IteratorMode::From(account_prefix, rocksdb::Direction::Forward));
+        
+        for item in iter {
+            let (key, value) = item.map_err(|e| CoreError::SMTError(format!("Failed to iterate accounts: {}", e)))?;
+            
+            let key_str = String::from_utf8_lossy(&key);
+            if !key_str.starts_with(ACCOUNT_PREFIX) {
+                // We've moved past the account prefix
+                break;
+            }
+            
+            let leaf: AccountLeaf = bincode::deserialize(&value)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?;
+            
+            // Add to accounts cache
+            smt.accounts.insert((leaf.addr, leaf.token_id), leaf.clone());
             
             // Update the tree
-            let key = compute_leaf_key(addr, *token_id);
+            let key = compute_leaf_key(&leaf.addr, leaf.token_id);
             let addr_h256 = H256::from(key);
             let leaf_hash = leaf.hash();
             let value_h256 = H256::from(leaf_hash);
             
             // Ignore errors during loading
-            let _ = self.tree.update(addr_h256, value_h256);
+            if let Err(e) = smt.tree.update(addr_h256, value_h256) {
+                warn!("Failed to update tree during loading: {}", e);
+            }
         }
-
-        // Load token registry
-        for (token_id, info) in &self.serialized_tokens {
-            self.token_registry.insert(*token_id, info.clone());
+        
+        // Load tokens
+        let token_prefix = TOKEN_PREFIX.as_bytes();
+        let iter = db.iterator(IteratorMode::From(token_prefix, rocksdb::Direction::Forward));
+        
+        for item in iter {
+            let (key, value) = item.map_err(|e| CoreError::SMTError(format!("Failed to iterate tokens: {}", e)))?;
+            
+            let key_str = String::from_utf8_lossy(&key);
+            if !key_str.starts_with(TOKEN_PREFIX) {
+                // We've moved past the token prefix
+                break;
+            }
+            
+            let token_info: TokenInfo = bincode::deserialize(&value)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?;
+            
+            // Add to token registry
+            smt.token_registry.insert(token_info.token_id, token_info);
         }
-
+        
+        // Ensure the native token exists
+        if !smt.token_registry.contains_key(&0) {
+            let native_token = TokenInfo {
+                token_id: 0,
+                issuer: [0u8; 32],
+                metadata: "VOLT|Volt Token|18".to_string(),
+                total_supply: 0,
+            };
+            smt.token_registry.insert(0, native_token);
+        }
+        
         // Update the root
-        let root_h256 = self.tree.root();
-        self.root.copy_from_slice(root_h256.as_slice());
-    }
-
-    /// Saves the SMT state to a file.
-    pub fn save_to_file<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<(), std::io::Error> {
-        // Sync the in-memory data with the serializable fields
-        self.sync_for_persistence();
-        
-        // Serialize and save
-        let file = std::fs::File::create(path)?;
-        serde_json::to_writer(file, self)?;
-        
-        Ok(())
-    }
-
-    /// Loads the SMT state from a file.
-    pub fn load_from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, std::io::Error> {
-        // Load the serialized data
-        let file = std::fs::File::open(path)?;
-        let mut smt: Self = serde_json::from_reader(file)?;
-        
-        // Rebuild the in-memory data structures
-        smt.load_from_persistence();
+        let root_h256 = smt.tree.root();
+        smt.root.copy_from_slice(root_h256.as_slice());
         
         Ok(smt)
     }
@@ -248,13 +331,24 @@ impl SMT {
         };
         
         // Add the token to the registry
-        self.token_registry.insert(token_id, token_info);
+        self.token_registry.insert(token_id, token_info.clone());
         
         // Increment the next token ID
         self.next_token_id += 1;
         
-        // Sync for persistence
-        self.sync_for_persistence();
+        // Persist to RocksDB if available
+        if let Some(db) = &self.db {
+            // Persist the token info
+            let token_key = format!("{}{}", TOKEN_PREFIX, token_id);
+            db.put(token_key.as_bytes(), bincode::serialize(&token_info)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?)
+                .map_err(|e| CoreError::SMTError(format!("Failed to persist token: {}", e)))?;
+            
+            // Persist the updated next token ID
+            db.put(NEXT_TOKEN_ID_KEY, bincode::serialize(&self.next_token_id)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?)
+                .map_err(|e| CoreError::SMTError(format!("Failed to persist next token ID: {}", e)))?;
+        }
         
         Ok(token_id)
     }
@@ -281,10 +375,16 @@ impl SMT {
                 })?;
         }
         
-        self.token_registry.insert(token_id, token_info);
+        self.token_registry.insert(token_id, token_info.clone());
         
-        // Sync for persistence
-        self.sync_for_persistence();
+        // Persist to RocksDB if available
+        if let Some(db) = &self.db {
+            // Persist the updated token info
+            let token_key = format!("{}{}", TOKEN_PREFIX, token_id);
+            db.put(token_key.as_bytes(), bincode::serialize(&token_info)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?)
+                .map_err(|e| CoreError::SMTError(format!("Failed to persist token: {}", e)))?;
+        }
         
         Ok(())
     }
@@ -319,10 +419,21 @@ impl SMT {
         self.root.copy_from_slice(root_h256.as_slice());
 
         // Update the accounts cache
-        self.accounts.insert((leaf.addr, leaf.token_id), leaf);
+        self.accounts.insert((leaf.addr, leaf.token_id), leaf.clone());
 
-        // Sync for persistence
-        self.sync_for_persistence();
+        // Persist to RocksDB if available
+        if let Some(db) = &self.db {
+            // Persist the updated account
+            let account_key = format!("{}{:?}:{}", ACCOUNT_PREFIX, leaf.addr, leaf.token_id);
+            db.put(account_key.as_bytes(), bincode::serialize(&leaf)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?)
+                .map_err(|e| CoreError::SMTError(format!("Failed to persist account: {}", e)))?;
+            
+            // Persist the updated root
+            db.put(ROOT_KEY, bincode::serialize(&self.root)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?)
+                .map_err(|e| CoreError::SMTError(format!("Failed to persist root: {}", e)))?;
+        }
 
         Ok(())
     }
@@ -774,8 +885,44 @@ impl SMT {
                 .map_err(|e| CoreError::SMTError(e.to_string()))?;
         }
         
-        // Sync for persistence
-        self.sync_for_persistence();
+        // Persist to RocksDB if available
+        if let Some(db) = &self.db {
+            // Clear existing data in DB
+            info!("Clearing existing state in RocksDB before setting new state");
+            
+            // Clear accounts
+            let account_prefix = ACCOUNT_PREFIX.as_bytes();
+            let iter = db.iterator(IteratorMode::From(account_prefix, rocksdb::Direction::Forward));
+            let mut keys_to_delete = Vec::new();
+            
+            for item in iter {
+                let (key, _) = item.map_err(|e| CoreError::SMTError(format!("Failed to iterate accounts: {}", e)))?;
+                let key_str = String::from_utf8_lossy(&key);
+                if !key_str.starts_with(ACCOUNT_PREFIX) {
+                    break;
+                }
+                keys_to_delete.push(key.to_vec());
+            }
+            
+            for key in keys_to_delete {
+                db.delete(&key).map_err(|e| CoreError::SMTError(format!("Failed to delete account: {}", e)))?;
+            }
+            
+            // Persist the new root
+            db.put(ROOT_KEY, bincode::serialize(&self.root)
+                .map_err(|e| CoreError::SerializationError(e.to_string()))?)
+                .map_err(|e| CoreError::SMTError(format!("Failed to persist root: {}", e)))?;
+            
+            // Persist all accounts
+            for ((addr, token_id), leaf) in &self.accounts {
+                let account_key = format!("{}{:?}:{}", ACCOUNT_PREFIX, addr, token_id);
+                db.put(account_key.as_bytes(), bincode::serialize(leaf)
+                    .map_err(|e| CoreError::SerializationError(e.to_string()))?)
+                    .map_err(|e| CoreError::SMTError(format!("Failed to persist account: {}", e)))?;
+            }
+            
+            info!("Successfully persisted full state to RocksDB");
+        }
         
         Ok(())
     }
