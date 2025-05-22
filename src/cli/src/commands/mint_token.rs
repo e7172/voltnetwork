@@ -6,7 +6,7 @@ use crate::wallet::Wallet;
 use anyhow::Result;
 use core::{proofs::Proof, types::Address};
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Runs the mint-token command.
 pub async fn run<P: AsRef<Path>>(
@@ -187,9 +187,26 @@ async fn get_proof_from_node(node_url: &str, address: &Address, token_id: u64) -
         .map_err(|e| WalletError::NetworkError(format!("Failed to parse response: {}", e)))?;
 
     if let Some(error) = response_json.get("error") {
+        // Log the raw error for debugging
+        debug!("Node returned error response: {:?}", error);
+        
+        // Extract the error message if possible
+        let error_msg = if let Some(msg) = error.get("message") {
+            msg.as_str().unwrap_or("Unknown error")
+        } else {
+            "Unknown error"
+        };
+        
+        // Extract the error data if available
+        let error_data = if let Some(data) = error.get("data") {
+            format!(": {}", data)
+        } else {
+            String::new()
+        };
+        
         return Err(WalletError::NetworkError(format!(
-            "Node returned error: {}",
-            error
+            "Node returned error: {}{}",
+            error_msg, error_data
         )));
     }
 
@@ -290,9 +307,26 @@ async fn get_nonce_from_node(node_url: &str, address: &Address, token_id: u64) -
         .map_err(|e| WalletError::NetworkError(format!("Failed to parse response: {}", e)))?;
 
     if let Some(error) = response_json.get("error") {
+        // Log the raw error for debugging
+        debug!("Node returned error response: {:?}", error);
+        
+        // Extract the error message if possible
+        let error_msg = if let Some(msg) = error.get("message") {
+            msg.as_str().unwrap_or("Unknown error")
+        } else {
+            "Unknown error"
+        };
+        
+        // Extract the error data if available
+        let error_data = if let Some(data) = error.get("data") {
+            format!(": {}", data)
+        } else {
+            String::new()
+        };
+        
         return Err(WalletError::NetworkError(format!(
-            "Node returned error: {}",
-            error
+            "Node returned error: {}{}",
+            error_msg, error_data
         )));
     }
 
@@ -324,27 +358,61 @@ async fn broadcast_mint_token_to_node(
     
     let message_hex = hex::encode(&message_bytes);
     
+    // Log the request for debugging
+    let request_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "p3p_mintToken",
+        "params": [message_hex]
+    });
+    
+    info!("Sending RPC request to {}: {}", rpc_url, serde_json::to_string_pretty(&request_body).unwrap_or_default());
+    
     let response = client
         .post(&rpc_url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "p3p_mintToken",
-            "params": [message_hex]
-        }))
+        .json(&request_body)
         .send()
         .await
         .map_err(|e| WalletError::NetworkError(format!("Failed to connect to node: {}", e)))?;
 
-    let response_json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| WalletError::NetworkError(format!("Failed to parse response: {}", e)))?;
+    // Get the raw response text for debugging
+    let response_status = response.status();
+    let response_text = response.text().await
+        .map_err(|e| WalletError::NetworkError(format!("Failed to get response text: {}", e)))?;
+    
+    info!("Raw RPC response (status {}): {}", response_status, response_text);
+    
+    // Parse the response as JSON
+    let response_json: serde_json::Value = match serde_json::from_str(&response_text) {
+        Ok(json) => json,
+        Err(e) => {
+            error!("Failed to parse response as JSON: {}", e);
+            error!("Response text: {}", response_text);
+            return Err(WalletError::NetworkError(format!("Failed to parse response as JSON: {}", e)));
+        }
+    };
 
     if let Some(error) = response_json.get("error") {
+        // Log the raw error for debugging
+        debug!("Node returned error response: {:?}", error);
+        
+        // Extract the error message if possible
+        let error_msg = if let Some(msg) = error.get("message") {
+            msg.as_str().unwrap_or("Unknown error")
+        } else {
+            "Unknown error"
+        };
+        
+        // Extract the error data if available
+        let error_data = if let Some(data) = error.get("data") {
+            format!(": {}", data)
+        } else {
+            String::new()
+        };
+        
         return Err(WalletError::NetworkError(format!(
-            "Node returned error: {}",
-            error
+            "Node returned error: {}{}",
+            error_msg, error_data
         )));
     }
 

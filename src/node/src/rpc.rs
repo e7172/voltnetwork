@@ -842,98 +842,149 @@ fn handle_mint_token(
     params: &serde_json::Value,
     state: &RpcState,
 ) -> Result<serde_json::Value, JsonRpcError> {
+    // Log the raw parameters for debugging
+    info!("p3p_mintToken called with params: {:?}", params);
+    
     // Parse parameters
     let params = params
         .as_array()
-        .ok_or_else(|| JsonRpcError {
-            code: -32602,
-            message: "Invalid params".to_string(),
-            data: None,
+        .ok_or_else(|| {
+            let err = JsonRpcError {
+                code: -32602,
+                message: "Invalid params: expected array".to_string(),
+                data: None,
+            };
+            error!("p3p_mintToken error: {:?}", err);
+            err
         })?;
 
     if params.len() != 1 {
-        return Err(JsonRpcError {
+        let err = JsonRpcError {
             code: -32602,
-            message: "Invalid params".to_string(),
+            message: format!("Invalid params: expected 1 parameter, got {}", params.len()),
             data: None,
-        });
+        };
+        error!("p3p_mintToken error: {:?}", err);
+        return Err(err);
     }
 
-    let message_hex = params[0].as_str().ok_or_else(|| JsonRpcError {
-        code: -32602,
-        message: "Invalid message".to_string(),
-        data: None,
+    let message_hex = params[0].as_str().ok_or_else(|| {
+        let err = JsonRpcError {
+            code: -32602,
+            message: "Invalid message: expected string".to_string(),
+            data: None,
+        };
+        error!("p3p_mintToken error: {:?}", err);
+        err
     })?;
 
     // Parse the message
-    let message_bytes = hex::decode(message_hex).map_err(|e| {
-        JsonRpcError {
-            code: -32602,
-            message: "Invalid message".to_string(),
-            data: Some(serde_json::to_value(e.to_string()).unwrap()),
+    let message_bytes = match hex::decode(message_hex) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let err = JsonRpcError {
+                code: -32602,
+                message: format!("Invalid message hex: {}", e),
+                data: Some(serde_json::to_value(e.to_string()).unwrap()),
+            };
+            error!("p3p_mintToken error: {:?}", err);
+            return Err(err);
         }
-    })?;
+    };
 
-    let message: core::types::SystemMsg = bincode::deserialize(&message_bytes).map_err(|e| {
-        JsonRpcError {
-            code: -32602,
-            message: "Invalid message".to_string(),
-            data: Some(serde_json::to_value(e.to_string()).unwrap()),
+    let message: core::types::SystemMsg = match bincode::deserialize(&message_bytes) {
+        Ok(msg) => {
+            info!("Successfully deserialized message: {:?}", msg);
+            msg
+        },
+        Err(e) => {
+            let err = JsonRpcError {
+                code: -32602,
+                message: format!("Failed to deserialize message: {}", e),
+                data: Some(serde_json::to_value(e.to_string()).unwrap()),
+            };
+            error!("p3p_mintToken error: {:?}", err);
+            return Err(err);
         }
-    })?;
+    };
 
     // Process the message
     match message {
         core::types::SystemMsg::Mint { from, to, token_id, amount, nonce, signature } => {
+            info!("Processing mint message: from={:?}, to={:?}, token_id={}, amount={}, nonce={}",
+                  from, to, token_id, amount, nonce);
+            
             // Verify the signature
-            let message_bytes = bincode::serialize(&core::types::SystemMsg::Mint {
+            let message_bytes = match bincode::serialize(&core::types::SystemMsg::Mint {
                 from,
                 to,
                 token_id,
                 amount,
                 nonce,
                 signature: core::types::Signature([0u8; 64]), // Empty signature for verification
-            })
-            .map_err(|e| JsonRpcError {
-                code: -32603,
-                message: "Failed to serialize message".to_string(),
-                data: Some(serde_json::to_value(e.to_string()).unwrap()),
-            })?;
+            }) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    let err = JsonRpcError {
+                        code: -32603,
+                        message: format!("Failed to serialize message: {}", e),
+                        data: Some(serde_json::to_value(e.to_string()).unwrap()),
+                    };
+                    error!("p3p_mintToken error: {:?}", err);
+                    return Err(err);
+                }
+            };
 
             // Verify the signature using ed25519-dalek
-            let public_key = ed25519_dalek::PublicKey::from_bytes(&from[..32]).map_err(|e| {
-                JsonRpcError {
-                    code: -32603,
-                    message: "Invalid public key".to_string(),
-                    data: Some(serde_json::to_value(e.to_string()).unwrap()),
+            let public_key = match ed25519_dalek::PublicKey::from_bytes(&from[..32]) {
+                Ok(pk) => pk,
+                Err(e) => {
+                    let err = JsonRpcError {
+                        code: -32603,
+                        message: format!("Invalid public key: {}", e),
+                        data: Some(serde_json::to_value(e.to_string()).unwrap()),
+                    };
+                    error!("p3p_mintToken error: {:?}", err);
+                    return Err(err);
                 }
-            })?;
+            };
 
-            let signature = ed25519_dalek::Signature::from_bytes(&signature.0).map_err(|e| {
-                JsonRpcError {
-                    code: -32603,
-                    message: "Invalid signature".to_string(),
-                    data: Some(serde_json::to_value(e.to_string()).unwrap()),
+            let signature = match ed25519_dalek::Signature::from_bytes(&signature.0) {
+                Ok(sig) => sig,
+                Err(e) => {
+                    let err = JsonRpcError {
+                        code: -32603,
+                        message: format!("Invalid signature: {}", e),
+                        data: Some(serde_json::to_value(e.to_string()).unwrap()),
+                    };
+                    error!("p3p_mintToken error: {:?}", err);
+                    return Err(err);
                 }
-            })?;
+            };
 
             if let Err(e) = public_key.verify(&message_bytes, &signature) {
-                return Err(JsonRpcError {
+                let err = JsonRpcError {
                     code: -32603,
-                    message: "Invalid signature".to_string(),
+                    message: format!("Signature verification failed: {}", e),
                     data: Some(serde_json::to_value(e.to_string()).unwrap()),
-                });
+                };
+                error!("p3p_mintToken error: {:?}", err);
+                return Err(err);
             }
 
             // Check if the token exists
             {
                 let smt = state.smt.lock().unwrap();
                 if let Err(e) = smt.get_token(token_id) {
-                    return Err(JsonRpcError {
+                    let err = JsonRpcError {
                         code: -32603,
                         message: format!("Token not found: {}", e),
-                        data: None,
-                    });
+                        data: Some(serde_json::to_value(e.to_string()).unwrap()),
+                    };
+                    error!("p3p_mintToken error: {:?}", err);
+                    return Err(err);
+                } else {
+                    info!("Token {} exists, proceeding with mint", token_id);
                 }
             }
 
@@ -944,45 +995,50 @@ fn handle_mint_token(
                 // Get the issuer's account
                 let mut issuer_account = match smt.get_account_with_token(&from, token_id) {
                     Ok(account) => account,
-                    Err(_) => {
+                    Err(e) => {
+                        // Check if the token exists first
+                        if let Err(token_err) = smt.get_token(token_id) {
+                            return Err(JsonRpcError {
+                                code: -32603,
+                                message: format!("Token not found: {}", token_err),
+                                data: Some(serde_json::to_value(token_err.to_string()).unwrap()),
+                            });
+                        }
+                        
                         // If the issuer account doesn't exist, create a new one
+                        info!("Creating new issuer account for token {}: {}", token_id, e);
                         core::types::AccountLeaf::new_empty(from, token_id)
                     }
                 };
 
                 // Check the nonce
                 if issuer_account.nonce != nonce {
-                    return Err(JsonRpcError {
+                    let err = JsonRpcError {
                         code: -32603,
                         message: format!("Invalid nonce: expected {}, got {}", issuer_account.nonce, nonce),
                         data: None,
-                    });
+                    };
+                    error!("p3p_mintToken error: {:?}", err);
+                    return Err(err);
                 }
+                
+                // The mint_token function will handle updating both accounts and the token supply
 
-                // Update the issuer's account
-                issuer_account.nonce += 1;
-                smt.update_account_with_token(issuer_account, token_id).map_err(|e| JsonRpcError {
-                    code: -32603,
-                    message: "Failed to update issuer account".to_string(),
-                    data: Some(serde_json::to_value(e.to_string()).unwrap()),
-                })?;
-
-                // Get the recipient's account
-                let mut recipient_account = match smt.get_account_with_token(&to, token_id) {
-                    Ok(account) => account,
-                    Err(_) => {
-                        // If the recipient account doesn't exist, create a new one
-                        core::types::AccountLeaf::new_empty(to, token_id)
+                // Use the mint_token method to handle all the updates in one go
+                match smt.mint_token(&from, &to, token_id, amount, nonce) {
+                    Ok(new_supply) => {
+                        info!("Successfully minted {} tokens with ID {}. New supply: {}", amount, token_id, new_supply);
+                    },
+                    Err(e) => {
+                        let err = JsonRpcError {
+                            code: -32603,
+                            message: format!("Failed to mint token: {}", e),
+                            data: Some(serde_json::to_value(e.to_string()).unwrap()),
+                        };
+                        error!("p3p_mintToken error: {:?}", err);
+                        return Err(err);
                     }
-                };
-
-                // Update the recipient's account
-                recipient_account.bal += amount;
-                smt.update_account_with_token(recipient_account, token_id).map_err(|e| JsonRpcError {
-                    code: -32603,
-                    message: "Failed to update recipient account".to_string(),
-                    data: Some(serde_json::to_value(e.to_string()).unwrap()),
-                })?;
+                }
             }
 
             // Generate a transaction hash
@@ -993,15 +1049,19 @@ fn handle_mint_token(
                 hex::encode(result)
             };
 
+            info!("Mint transaction successful, hash: {}", tx_hash);
+            
             // Return the transaction hash
             Ok(serde_json::json!(tx_hash))
         },
         _ => {
-            Err(JsonRpcError {
+            let err = JsonRpcError {
                 code: -32602,
-                message: "Invalid message type".to_string(),
+                message: format!("Invalid message type: expected Mint, got {:?}", message),
                 data: None,
-            })
+            };
+            error!("p3p_mintToken error: {:?}", err);
+            Err(err)
         }
     }
 }
@@ -2089,34 +2149,21 @@ fn handle_get_tokens(state: &RpcState) -> Result<serde_json::Value, JsonRpcError
         // Get all tokens
         let mut tokens = Vec::new();
         
-        // Get all accounts to find all token IDs
-        let accounts = smt.get_all_accounts().map_err(|e| JsonRpcError {
+        // Get all tokens directly from the token registry
+        let token_registry = smt.get_token_registry().map_err(|e| JsonRpcError {
             code: -32603,
-            message: "Failed to get accounts".to_string(),
+            message: "Failed to get token registry".to_string(),
             data: Some(serde_json::to_value(e.to_string()).unwrap()),
         })?;
         
-        // Extract unique token IDs
-        let mut token_ids = std::collections::HashSet::new();
-        for account in &accounts {
-            token_ids.insert(account.token_id);
-        }
-        
-        // Get token info for each token ID
-        for token_id in token_ids {
-            match smt.get_token(token_id) {
-                Ok(token_info) => {
-                    tokens.push(serde_json::json!({
-                        "token_id": token_info.token_id,
-                        "issuer": hex::encode(token_info.issuer),
-                        "metadata": token_info.metadata,
-                        "total_supply": token_info.total_supply,
-                    }));
-                },
-                Err(e) => {
-                    warn!("RPC: Failed to get token info for token ID {}: {}", token_id, e);
-                }
-            }
+        // Convert token info to JSON
+        for (token_id, token_info) in token_registry {
+            tokens.push(serde_json::json!({
+                "token_id": token_id,
+                "issuer": hex::encode(token_info.issuer),
+                "metadata": token_info.metadata,
+                "total_supply": token_info.total_supply,
+            }));
         }
         
         info!("RPC: Found {} tokens", tokens.len());

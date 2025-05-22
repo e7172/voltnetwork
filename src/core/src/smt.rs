@@ -361,6 +361,11 @@ impl SMT {
             .ok_or_else(|| CoreError::TokenNotFound(token_id))
     }
     
+    /// Gets the entire token registry.
+    pub fn get_token_registry(&self) -> Result<&std::collections::HashMap<TokenId, TokenInfo>, CoreError> {
+        Ok(&self.token_registry)
+    }
+    
     /// Updates a token's total supply.
     fn update_token_supply(&mut self, token_id: TokenId, amount: Balance, is_mint: bool) -> Result<(), CoreError> {
         let mut token_info = self.get_token(token_id)?;
