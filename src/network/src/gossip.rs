@@ -25,6 +25,9 @@ pub fn new_gossipsub(
         .heartbeat_interval(std::time::Duration::from_secs(10))
         .validation_mode(ValidationMode::Strict)
         .message_id_fn(message_id_fn)
+        .mesh_n_low(1)        // Allow publishing with as few as 1 peer
+        .mesh_n(3)            // Target 3 peers in mesh (default is 6)
+        .mesh_outbound_min(1) // Require at least 1 outbound peer
         .build()
         .map_err(|e| NetworkError::GossipError(e.to_string()))?;
 

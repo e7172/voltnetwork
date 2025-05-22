@@ -115,15 +115,28 @@ pub async fn init_swarm(
     let mut kademlia = Kademlia::with_config(local_peer_id, store, kademlia_config);
 
     // Add bootstrap nodes
-    for addr in bootstrap_nodes {
-        // Generate a random peer ID for bootstrap nodes
-        // This is a temporary solution - in production, you would want to use the actual peer ID
-        let peer_id = PeerId::random();
-        kademlia.add_address(&peer_id, addr.clone());
-        log::info!("Added bootstrap node: {} at {}", peer_id, addr);
-    }
+    use libp2p::multiaddr::Protocol;
+    for addr in bootstrap_nodes.iter() {
+        // pull out any Protocol::P2p(peer_id) entries
+        let maybe_peer = addr
+            .iter()
+            .filter_map(|protocol| {
+                if let Protocol::P2p(peer_id) = protocol {
+                    // protocol is owned, peer_id: PeerId
+                    Some(peer_id.clone())
+                } else {
+                    None
+                }
+            })
+            .next();
 
-    // Create a Gossipsub instance
+        if let Some(peer_id) = maybe_peer {
+            kademlia.add_address(&peer_id, addr.clone());
+            log::info!("Bootstrapped Kademlia to {} at {}", peer_id, addr);
+        } else {
+            log::warn!("Bootstrap address {} missing /p2p/<PeerId>", addr);
+        }
+    }    // Create a Gossipsub instance
     let gossipsub = new_gossipsub(&local_key, &local_peer_id)?;
 
     // Create a Ping instance
@@ -262,4 +275,3 @@ pub fn handle_network_event_sync(
     Ok(None)
 }
 
-// No replacement needed - removing the function
