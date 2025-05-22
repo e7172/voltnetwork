@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use tracing::{info, warn, error, debug};
 use warp::{Filter, Rejection, Reply};
 
 /// Full state of the SMT.
@@ -288,14 +289,24 @@ fn handle_get_balance(
     let mut address = [0u8; 32];
     address.copy_from_slice(&address_bytes);
 
-    // Get the account
+    // Get the account - in production, we need to ensure we're getting the latest state
     let balance = {
-        let smt = state.smt.lock().unwrap();
+        // First, try to get the account from the SMT
+        let mut smt = state.smt.lock().unwrap();
+        
+        // Log the request for debugging
+        info!("RPC: Getting balance for address: {:?}", address);
+        
+        // Try to get the account from the SMT
         match smt.get_account(&address) {
-            Ok(account) => account.bal,
-            Err(_) => {
+            Ok(account) => {
+                info!("RPC: Found account with balance: {}", account.bal);
+                account.bal
+            },
+            Err(e) => {
                 // If the account doesn't exist, return a balance of 0
                 // This is more user-friendly than returning an error
+                warn!("RPC: Account not found: {}", e);
                 0
             }
         }
@@ -374,12 +385,20 @@ fn handle_get_nonce(
 
     // Get the account
     let nonce = {
-        let smt = state.smt.lock().unwrap();
+        let mut smt = state.smt.lock().unwrap();
+        
+        // Log the request for debugging
+        info!("RPC: Getting nonce for address: {:?}", address);
+        
         match smt.get_account(&address) {
-            Ok(account) => account.nonce,
-            Err(_) => {
+            Ok(account) => {
+                info!("RPC: Found account with nonce: {}", account.nonce);
+                account.nonce
+            },
+            Err(e) => {
                 // If the account doesn't exist, return a nonce of 0
                 // This is more user-friendly than returning an error
+                warn!("RPC: Account not found: {}", e);
                 0
             }
         }
@@ -1831,19 +1850,28 @@ fn handle_set_full_state(
 /// Handles the get_full_state method.
 fn handle_get_full_state(state: &RpcState) -> Result<serde_json::Value, JsonRpcError> {
     // Get all accounts from the SMT
-    let accounts = {
-        let smt = state.smt.lock().unwrap();
-        smt.get_all_accounts().map_err(|e| JsonRpcError {
-            code: -32603,
-            message: "Failed to get accounts".to_string(),
-            data: Some(serde_json::to_value(e.to_string()).unwrap()),
-        })?
-    };
+    // Log the request for debugging
+    info!("RPC: Getting full state");
     
-    // Get the current root
-    let root = {
-        let smt = state.smt.lock().unwrap();
-        smt.root()
+    let (accounts, root) = {
+        let mut smt = state.smt.lock().unwrap();
+        
+        // Get all accounts
+        let accounts = smt.get_all_accounts().map_err(|e| {
+            error!("RPC: Failed to get accounts: {}", e);
+            JsonRpcError {
+                code: -32603,
+                message: "Failed to get accounts".to_string(),
+                data: Some(serde_json::to_value(e.to_string()).unwrap()),
+            }
+        })?;
+        
+        // Get the current root
+        let root = smt.root();
+        
+        info!("RPC: Retrieved {} accounts with root {:?}", accounts.len(), root);
+        
+        (accounts, root)
     };
     
     // Create the full state
