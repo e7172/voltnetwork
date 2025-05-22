@@ -32,7 +32,7 @@ http://3.90.180.149:8545
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/username/volt.git
+git clone https://github.com/e7172/voltnetwork.git
 cd volt
 ```
 
