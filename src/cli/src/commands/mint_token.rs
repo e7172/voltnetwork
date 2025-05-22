@@ -257,7 +257,7 @@ async fn get_proof_from_node(node_url: &str, address: &Address, token_id: u64) -
         path.push(bit);
     }
 
-    Ok(Proof::new(siblings, leaf_hash, path))
+    Ok(Proof::new(siblings, leaf_hash, path, 0)) // Adding zeros_omitted parameter with default value 0
 }
 
 /// Gets the nonce for an address and token from the node.

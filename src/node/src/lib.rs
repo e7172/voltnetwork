@@ -144,6 +144,7 @@ pub async fn handle_update(
         to: update.to,
         amount: update.amount,
         root: update.root,
+        post_root: update.post_root,
         proof_from: update.proof_from.clone(),
         proof_to: update.proof_to.clone(),
         nonce: update.nonce,

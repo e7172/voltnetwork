@@ -447,6 +447,7 @@ fn handle_broadcast_update(
         to: update_msg.to,
         amount: update_msg.amount,
         root: update_msg.root,
+        post_root: update_msg.post_root,
         proof_from: update_msg.proof_from.clone(),
         proof_to: update_msg.proof_to.clone(),
         nonce: update_msg.nonce,
@@ -1721,6 +1722,7 @@ fn handle_send(
                 to,
                 amount,
                 root,
+                post_root: root, // Using the same root as post_root for now
                 proof_from,
                 proof_to,
                 nonce,

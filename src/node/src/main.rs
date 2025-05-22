@@ -571,34 +571,6 @@ async fn main() -> Result<()> {
         }
     });
 
-     // Extracts the IP address and port from a multiaddr.
-    fn extract_ip_port(addr: &Multiaddr) -> Option<(String, u16)> {
-        use libp2p::multiaddr::Protocol;
-        
-        let mut iter = addr.iter();
-        let mut ip = None;
-        let mut port = None;
-        
-        while let Some(protocol) = iter.next() {
-            match protocol {
-                Protocol::Ip4(addr) => {
-                    ip = Some(addr.to_string());
-                }
-                Protocol::Ip6(addr) => {
-                    ip = Some(addr.to_string());
-                }
-                Protocol::Tcp(p) => {
-                    port = Some(p);
-                }
-                _ => {}
-            }
-        }
-        
-        match (ip, port) {
-            (Some(ip), Some(port)) => Some((ip, port)),
-            _ => None,
-        }
-    }
 
     // Register metrics if enabled
     if opt.metrics {
@@ -1058,179 +1030,35 @@ pub async fn handle_update(
     Ok(())
 }
 
-/// Verifies the signature of an update message.
-fn verify_signature(update: &UpdateMsg) -> Result<(), NodeError> {
-                              update.nonce, account.nonce);
-                        
-                        // Create updated account with the new nonce and balance
-                        let new_balance = if account.bal >= update.amount {
-                            account.bal - update.amount
-                        } else {
-                            // If balance is insufficient, assume this is a recovery scenario
-                            // and set a reasonable balance
-                            update.amount
-                        };
-                        
-                        let updated_sender = core::types::AccountLeaf::new(
-                            update.from,
-                            new_balance,
-                            update.nonce,
-                            0 // Assuming native token
-                        );
-                        
-                        // Update the sender account
-                        if let Err(e) = smt.update_account(updated_sender) {
-                            error!("Failed to update sender account: {}", e);
-                            return Err(NodeError::InvalidProof("sender".to_string()));
-                        }
-                        
-                        // Update the recipient account
-                        let recipient = match smt.get_account(&update.to) {
-                            Ok(account) => {
-                                core::types::AccountLeaf::new(
-                                    update.to,
-                                    account.bal + update.amount,
-                                    account.nonce,
-                                    0 // Assuming native token
-                                )
-                            },
-                            Err(_) => {
-                                // Create a new account for the recipient
-                                core::types::AccountLeaf::new(
-                                    update.to,
-                                    update.amount,
-                                    0,
-                                    0 // Assuming native token
-                                )
-                            }
-                        };
-                        
-                        if let Err(e) = smt.update_account(recipient) {
-                            error!("Failed to update recipient account: {}", e);
-                            return Err(NodeError::InvalidProof("recipient".to_string()));
-                        }
-                        
-                        goto_store_proofs = true;
-                    } else {
-                        // If the update's nonce is lower, reject it as it's likely a replay
-                        return Err(NodeError::InvalidNonce(format!(
-                            "Update nonce {} is lower than account nonce {}",
-                            update.nonce, account.nonce
-                        )));
-                    }
-                } else {
-                    // Normal case - nonces match, proceed with transfer
-                    smt.transfer(&update.from, &update.to, update.amount, update.nonce)?;
-                }
-            },
-            Err(_) => {
-                // If the account doesn't exist, this might be a new account
-                // Create it with the appropriate balance and nonce
-                let sender = core::types::AccountLeaf::new(
-                    update.from,
-                    update.amount, // Assume initial balance is at least the amount being sent
-                    update.nonce,
-                    0 // Assuming native token
-                );
-                
-                if let Err(e) = smt.update_account(sender) {
-                    error!("Failed to create sender account: {}", e);
-                    return Err(NodeError::InvalidProof("sender".to_string()));
-                }
-                
-                // Create or update recipient account
-                let recipient = match smt.get_account(&update.to) {
-                    Ok(account) => {
-                        core::types::AccountLeaf::new(
-                            update.to,
-                            account.bal + update.amount,
-                            account.nonce,
-                            0 // Assuming native token
-                        )
-                    },
-                    Err(_) => {
-                        // Create a new account for the recipient
-                        core::types::AccountLeaf::new(
-                            update.to,
-                            update.amount,
-                            0,
-                            0 // Assuming native token
-                        )
-                    }
-                };
-                
-                if let Err(e) = smt.update_account(recipient) {
-                    error!("Failed to update recipient account: {}", e);
-                    return Err(NodeError::InvalidProof("recipient".to_string()));
-                }
-                
-                goto_store_proofs = true;
+
+     // Extracts the IP address and port from a multiaddr.
+fn extract_ip_port(addr: &Multiaddr) -> Option<(String, u16)> {
+    use libp2p::multiaddr::Protocol;
+    
+    let mut iter = addr.iter();
+    let mut ip = None;
+    let mut port = None;
+    
+    while let Some(protocol) = iter.next() {
+        match protocol {
+            Protocol::Ip4(addr) => {
+                ip = Some(addr.to_string());
             }
+            Protocol::Ip6(addr) => {
+                ip = Some(addr.to_string());
+            }
+            Protocol::Tcp(p) => {
+                port = Some(p);
+            }
+            _ => {}
         }
-        
-        // State is automatically persisted to RocksDB by the transfer method
     }
-
-    // Store the updated proofs and broadcast the full state to ensure all nodes are in sync
-    let (new_root, accounts) = {
-        let smt = smt.lock().unwrap();
-        let root = smt.root();
-        let accounts = smt.get_all_accounts().unwrap_or_default();
-        (root, accounts)
-    };
     
-    // Create a full state object for broadcasting
-    let full_state = rpc::FullState {
-        accounts,
-        root: new_root,
-    };
-    
-    // Broadcast the full state to ensure all nodes are in sync
-    // This is especially important after processing a transaction
-    info!("Broadcasting full state after transaction to ensure network consistency");
-    
-    // Queue the full state for broadcast in the next gossip cycle
-    if let Ok(state_json) = serde_json::to_string(&full_state) {
-        // Use the STATE_SYNC_TOPIC for full state synchronization
-        let mut swarm = swarm_mutex.lock().unwrap();
-        let topic = libp2p::gossipsub::IdentTopic::new(gossip::STATE_UPDATES_TOPIC);
-        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(
-            topic,
-            state_json.as_bytes(),
-        ) {
-            error!("Failed to broadcast full state: {}", e);
-        } else {
-            info!("Successfully queued full state for broadcast");
-        }
-    } else {
-        error!("Failed to serialize full state for broadcast");
+    match (ip, port) {
+        (Some(ip), Some(port)) => Some((ip, port)),
+        _ => None,
     }
-
-    // Generate and store new proofs
-    {
-        let smt = smt.lock().unwrap();
-
-        // Generate and store proof for sender
-        let sender_proof = smt.gen_proof(&update.from)?;
-        proof_store.put_proof(&update.from, &new_root, &sender_proof)?;
-
-        // Generate and store proof for recipient
-        let recipient_proof = smt.gen_proof(&update.to)?;
-        proof_store.put_proof(&update.to, &new_root, &recipient_proof)?;
-    }
-
-    info!(
-        "Processed transfer from {:?} to {:?} of {} tokens",
-        update.from, update.to, update.amount
-    );
-    metrics::TRANSACTION_COUNTER.inc();
-    
-    // Log success message for debugging and monitoring
-    info!("Successfully processed update from network");
-
-    Ok(())
 }
-
 /// Synchronizes the node's state from the network.
 ///
 /// This function attempts to synchronize the node's state from the network by
@@ -1440,14 +1268,14 @@ fn verify_signature(update: &UpdateMsg) -> Result<(), NodeError> {
     // Create the public key from the bytes
     let public_key = match PublicKey::from_bytes(&public_key_bytes) {
         Ok(pk) => pk,
-        Err(e) => return Err(NodeError::InvalidSignature(format!("Invalid public key: {}", e))),
+        Err(e) => return Err(NodeError::InvalidProof(format!("Invalid public key: {}", e))),
     };
     
     // Convert the core::types::Signature to ed25519_dalek::Signature
     let signature_bytes = update.signature.0;
     let signature = match Signature::from_bytes(&signature_bytes) {
         Ok(sig) => sig,
-        Err(e) => return Err(NodeError::InvalidSignature(format!("Invalid signature format: {}", e))),
+        Err(e) => return Err(NodeError::InvalidProof(format!("Invalid signature format: {}", e))),
     };
     
     // Create the transaction message for signature verification - matching how it's created in the CLI
@@ -1464,7 +1292,7 @@ fn verify_signature(update: &UpdateMsg) -> Result<(), NodeError> {
     // Serialize the transaction for signature verification
     let transaction_bytes = match serde_json::to_vec(&transaction) {
         Ok(bytes) => bytes,
-        Err(e) => return Err(NodeError::InvalidSignature(format!("Failed to serialize transaction: {}", e))),
+        Err(e) => return Err(NodeError::InvalidProof(format!("Failed to serialize transaction: {}", e))),
     };
     
     // Verify the signature
@@ -1479,7 +1307,7 @@ fn verify_signature(update: &UpdateMsg) -> Result<(), NodeError> {
             debug!("Amount: {}", update.amount);
             debug!("Nonce: {}", update.nonce);
             
-            Err(NodeError::InvalidSignature(format!("Signature verification failed: {}", e)))
+            Err(NodeError::InvalidProof(format!("Signature verification failed: {}", e)))
         }
     }
 }
