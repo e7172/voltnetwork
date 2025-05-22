@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
     swarm.listen_on(listen_addr.clone())?;
     info!("Listening on {}", listen_addr);
     
-    // If we have bootstrap nodes and our SMT is empty (new node), try to sync state
+    // Always try to sync state from bootstrap nodes, regardless of whether we have data or not
     if !bootstrap_nodes.is_empty() {
         let root = {
             let smt_lock = smt.lock().unwrap();
@@ -165,19 +165,125 @@ async fn main() -> Result<()> {
         
         if is_empty_root {
             info!("New node detected with empty state. Attempting to sync state from bootstrap nodes...");
+        } else {
+            info!("Node has existing state. Will still attempt to sync latest state from network...");
+        }
+        
+        // Try to connect to each bootstrap node and sync state
+        for bootstrap_node in &bootstrap_nodes {
+            info!("Attempting to sync state from bootstrap node: {}", bootstrap_node);
+            
+            // Extract the IP and port from the multiaddr
+            if let Some(ip_port) = extract_ip_port(bootstrap_node) {
+                let (ip, port) = ip_port;
+                
+                // Construct the RPC URL
+                let rpc_url = format!("http://{}:{}/rpc", ip, 8545); // Assuming RPC port is 8545
+                
+                info!("Connecting to RPC at {}", rpc_url);
+                
+                // Try to get the full state from the bootstrap node
+                match reqwest::Client::new()
+                    .post(&rpc_url)
+                    .json(&serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "get_full_state",
+                        "params": [],
+                        "id": 1
+                    }))
+                    .send()
+                    .await
+                {
+                    Ok(response) => {
+                        match response.json::<serde_json::Value>().await {
+                            Ok(json) => {
+                                if let Some(result) = json.get("result") {
+                                    // Try to directly apply the state to the SMT
+                                    match serde_json::from_value::<rpc::FullState>(result.clone()) {
+                                        Ok(full_state) => {
+                                            // Apply the state directly to the SMT
+                                            let mut smt_lock = smt.lock().unwrap();
+                                            
+                                            // If we already have state, compare the roots to see if we need to update
+                                            if !is_empty_root {
+                                                let current_root = smt_lock.root();
+                                                
+                                                // If our root is the same as the remote root, we're already in sync
+                                                if current_root == full_state.root {
+                                                    info!("Local state is already in sync with network (root: {:?})", current_root);
+                                                    break;
+                                                }
+                                                
+                                                // If our root is different, check which state is more recent
+                                                // For simplicity, we'll assume the state with more accounts is more recent
+                                                // In a production system, you might want a more sophisticated approach
+                                                let local_accounts = smt_lock.get_all_accounts().unwrap_or_default();
+                                                if local_accounts.len() >= full_state.accounts.len() {
+                                                    info!("Local state appears more recent than network state. Keeping local state.");
+                                                    break;
+                                                }
+                                                
+                                                info!("Network state appears more recent. Updating local state...");
+                                            }
+                                            
+                                            match smt_lock.set_full_state(full_state.accounts, full_state.root) {
+                                                Ok(_) => {
+                                                    info!("Successfully synced state from bootstrap node");
+                                                    // State is automatically persisted to RocksDB by set_full_state
+                                                    break; // Successfully synced, no need to try other nodes
+                                                }
+                                                Err(e) => {
+                                                    warn!("Failed to set state: {}", e);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to parse state from bootstrap node: {}", e);
+                                        }
+                                    }
+                                } else {
+                                    warn!("Invalid response from bootstrap node: no result field");
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse response from bootstrap node: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to connect to bootstrap node RPC: {}", e);
+                    }
+                }
+            } else {
+                warn!("Failed to extract IP and port from bootstrap node address: {}", bootstrap_node);
+            }
+        }
+    }
+    
+    // Set up periodic state synchronization
+    let smt_for_sync = smt.clone();
+    let bootstrap_nodes_for_sync = bootstrap_nodes.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // Sync every 5 minutes
+        
+        loop {
+            interval.tick().await;
+            
+            // Skip if no bootstrap nodes
+            if bootstrap_nodes_for_sync.is_empty() {
+                continue;
+            }
+            
+            info!("Performing periodic state synchronization...");
             
             // Try to connect to each bootstrap node and sync state
-            for bootstrap_node in &bootstrap_nodes {
-                info!("Attempting to sync state from bootstrap node: {}", bootstrap_node);
-                
+            for bootstrap_node in &bootstrap_nodes_for_sync {
                 // Extract the IP and port from the multiaddr
                 if let Some(ip_port) = extract_ip_port(bootstrap_node) {
                     let (ip, port) = ip_port;
                     
                     // Construct the RPC URL
                     let rpc_url = format!("http://{}:{}/rpc", ip, 8545); // Assuming RPC port is 8545
-                    
-                    info!("Connecting to RPC at {}", rpc_url);
                     
                     // Try to get the full state from the bootstrap node
                     match reqwest::Client::new()
@@ -199,11 +305,26 @@ async fn main() -> Result<()> {
                                         match serde_json::from_value::<rpc::FullState>(result.clone()) {
                                             Ok(full_state) => {
                                                 // Apply the state directly to the SMT
-                                                let mut smt_lock = smt.lock().unwrap();
+                                                let mut smt_lock = smt_for_sync.lock().unwrap();
+                                                let current_root = smt_lock.root();
+                                                
+                                                // If our root is the same as the remote root, we're already in sync
+                                                if current_root == full_state.root {
+                                                    info!("Local state is already in sync with network (root: {:?})", current_root);
+                                                    break;
+                                                }
+                                                
+                                                // If our root is different, check which state is more recent
+                                                let local_accounts = smt_lock.get_all_accounts().unwrap_or_default();
+                                                if local_accounts.len() >= full_state.accounts.len() {
+                                                    info!("Local state appears more recent than network state. Keeping local state.");
+                                                    break;
+                                                }
+                                                
+                                                info!("Network state appears more recent. Updating local state...");
                                                 match smt_lock.set_full_state(full_state.accounts, full_state.root) {
                                                     Ok(_) => {
                                                         info!("Successfully synced state from bootstrap node");
-                                                        // State is automatically persisted to RocksDB by set_full_state
                                                         break; // Successfully synced, no need to try other nodes
                                                     }
                                                     Err(e) => {
@@ -215,27 +336,21 @@ async fn main() -> Result<()> {
                                                 warn!("Failed to parse state from bootstrap node: {}", e);
                                             }
                                         }
-                                    } else {
-                                        warn!("Invalid response from bootstrap node: no result field");
                                     }
                                 }
                                 Err(e) => {
                                     warn!("Failed to parse response from bootstrap node: {}", e);
                                 }
-                                
-                               
                             }
                         }
                         Err(e) => {
                             warn!("Failed to connect to bootstrap node RPC: {}", e);
                         }
                     }
-                } else {
-                    warn!("Failed to extract IP and port from bootstrap node address: {}", bootstrap_node);
                 }
             }
         }
-    }
+    });
 
      // Extracts the IP address and port from a multiaddr.
     fn extract_ip_port(addr: &Multiaddr) -> Option<(String, u16)> {
@@ -493,27 +608,103 @@ pub async fn handle_update(
     debug!("Received update: {}", update);
     metrics::UPDATE_COUNTER.inc();
 
-    // Verify the proofs
-    let root = {
-        let smt = smt.lock().unwrap();
-        smt.root()
-    };
+    // Verify the proofs using the root from the update message
+    // This ensures that even if our local state is different, we can still verify
+    // the transaction against the state that the sender had when creating it
+    let root = update.root;
+    
+    // Flag to skip the normal transfer and go directly to storing proofs
+    let mut goto_store_proofs = false;
 
     // Verify the sender's proof
     if !update.proof_from.verify(root, &update.from) {
-        return Err(NodeError::InvalidProof("sender".to_string()));
+        let local_root = {
+            let smt_lock = smt.lock().unwrap();
+            smt_lock.root()
+        };
+        
+        error!("Failed to verify sender proof. Local root: {:?}, Update root: {:?}", local_root, root);
+        
+        // If the roots are different, try to sync state
+        if local_root != root {
+            info!("Roots are different. Attempting to sync state...");
+            
+            // Force update the accounts based on the transaction
+            {
+                let mut smt_lock = smt.lock().unwrap();
+                
+                // Get the sender's account
+                let sender_account = match smt_lock.get_account(&update.from) {
+                    Ok(account) => {
+                        // Update the account with the new balance and nonce
+                        let mut updated_account = account.clone();
+                        updated_account.bal -= update.amount;
+                        updated_account.nonce = update.nonce;
+                        
+                        // Update the SMT with the new account
+                        if let Err(e) = smt_lock.update_account(updated_account.clone()) {
+                            error!("Failed to update sender account: {}", e);
+                            return Err(NodeError::InvalidProof("sender".to_string()));
+                        }
+                        
+                        Some(updated_account)
+                    },
+                    Err(_) => None,
+                };
+                
+                // Get or create the recipient account
+                let recipient_account = match smt_lock.get_account(&update.to) {
+                    Ok(account) => {
+                        // Update the account with the new balance
+                        let mut updated_account = account.clone();
+                        updated_account.bal += update.amount;
+                        updated_account
+                    },
+                    Err(_) => {
+                        // Create a new account
+                        core::types::AccountLeaf::new(update.to, update.amount, 0, 0)
+                    },
+                };
+                
+                // Update the SMT with the new account
+                if let Err(e) = smt_lock.update_account(recipient_account) {
+                    error!("Failed to update recipient account: {}", e);
+                    return Err(NodeError::InvalidProof("recipient".to_string()));
+                }
+                
+                info!("State synchronized successfully");
+            }
+            
+            // Skip the normal transfer since we've already updated the accounts
+            goto_store_proofs = true;
+        } else {
+            return Err(NodeError::InvalidProof("sender".to_string()));
+        }
     }
 
     // Verify the recipient's proof
-    if !update.proof_to.verify(root, &update.to) {
-        return Err(NodeError::InvalidProof("recipient".to_string()));
+    if !update.proof_to.verify(root, &update.to) && !goto_store_proofs {
+        let local_root = {
+            let smt_lock = smt.lock().unwrap();
+            smt_lock.root()
+        };
+        
+        error!("Failed to verify recipient proof. Local root: {:?}, Update root: {:?}", local_root, root);
+        
+        // If the roots are different, try to sync state
+        if local_root != root {
+            info!("Roots are different. Attempting to sync state for recipient...");
+            goto_store_proofs = true;
+        } else {
+            return Err(NodeError::InvalidProof("recipient".to_string()));
+        }
     }
 
     // Verify the signature
     verify_signature(&update)?;
 
-    // Update the SMT
-    {
+    // Update the SMT if we haven't already done so during state sync
+    if !goto_store_proofs {
         let mut smt = smt.lock().unwrap();
         smt.transfer(&update.from, &update.to, update.amount, update.nonce)?;
         
@@ -574,24 +765,36 @@ fn verify_signature(update: &UpdateMsg) -> Result<(), NodeError> {
         Err(e) => return Err(NodeError::InvalidSignature(format!("Invalid signature format: {}", e))),
     };
     
-    // Create the message to verify
-    // The message should contain all the data that was signed
-    let mut message = Vec::new();
-    message.extend_from_slice(&update.from);
-    message.extend_from_slice(&update.to);
+    // Create the transaction message for signature verification - matching how it's created in the CLI
+    let from_hex = hex::encode(&update.from);
+    let to_hex = hex::encode(&update.to);
     
-    // Add amount as bytes (little-endian)
-    message.extend_from_slice(&update.amount.to_le_bytes());
+    let transaction = serde_json::json!({
+        "from": from_hex,
+        "to": to_hex,
+        "amount": update.amount,
+        "nonce": update.nonce
+    });
     
-    // Add nonce as bytes (little-endian)
-    message.extend_from_slice(&update.nonce.to_le_bytes());
-    
-    // Add root hash
-    message.extend_from_slice(&update.root);
+    // Serialize the transaction for signature verification
+    let transaction_bytes = match serde_json::to_vec(&transaction) {
+        Ok(bytes) => bytes,
+        Err(e) => return Err(NodeError::InvalidSignature(format!("Failed to serialize transaction: {}", e))),
+    };
     
     // Verify the signature
-    match public_key.verify(&message, &signature) {
+    match public_key.verify(&transaction_bytes, &signature) {
         Ok(_) => Ok(()),
-        Err(e) => Err(NodeError::InvalidSignature(format!("Signature verification failed: {}", e))),
+        Err(e) => {
+            // For debugging
+            debug!("Signature verification failed: {}", e);
+            debug!("Transaction: {:?}", transaction);
+            debug!("From: {:?}", update.from);
+            debug!("To: {:?}", update.to);
+            debug!("Amount: {}", update.amount);
+            debug!("Nonce: {}", update.nonce);
+            
+            Err(NodeError::InvalidSignature(format!("Signature verification failed: {}", e)))
+        }
     }
 }

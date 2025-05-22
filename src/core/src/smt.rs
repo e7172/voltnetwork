@@ -783,7 +783,8 @@ impl SMT {
         
         // Ensure path length matches siblings length
         path.truncate(siblings.len());
-
+        // Don't reverse the path - we want it in leaf-to-root order
+        // to match our compute_root_from_proof function
         Ok(Proof::new(siblings, leaf_hash, path))
     }
 

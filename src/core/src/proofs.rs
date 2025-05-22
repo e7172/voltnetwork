@@ -94,29 +94,63 @@ impl Proof {
     /// # Returns
     ///
     /// The computed root hash
+    // fn compute_root_from_proof(&self, path: &[bool]) -> [u8; 32] {
+    //     let mut current_hash = self.leaf_hash;
+    //     println!("Computing root from leaf hash: {:?}", current_hash);
+
+    //     // Traverse from leaf to root
+    //     for (i, &bit) in path.iter().enumerate() {
+    //         let sibling = self.siblings[i];
+    //         println!("Step {}: bit={}, sibling={:?}", i, bit, sibling);
+            
+    //         // Compute the parent hash
+    //         let mut hasher = Sha256::new();
+    //         if bit {
+    //             // If bit is 1, current_hash is the right child
+    //             println!("  Hashing: sibling + current_hash");
+    //             hasher.update(sibling);
+    //             hasher.update(current_hash);
+    //         } else {
+    //             // If bit is 0, current_hash is the left child
+    //             println!("  Hashing: current_hash + sibling");
+    //             hasher.update(current_hash);
+    //             hasher.update(sibling);
+    //         }
+            
+    //         let result = hasher.finalize();
+    //         current_hash.copy_from_slice(&result);
+    //         println!("  New hash: {:?}", current_hash);
+    //     }
+
+    //     println!("Final computed root: {:?}", current_hash);
+    //     current_hash
+    // }
     fn compute_root_from_proof(&self, path: &[bool]) -> [u8; 32] {
         let mut current_hash = self.leaf_hash;
         println!("Computing root from leaf hash: {:?}", current_hash);
 
-        // Traverse from leaf to root
-        for (i, &bit) in path.iter().enumerate() {
+        // Traverse from the leaf back up to the root.
+        // The path in the proof is already in the correct order (from leaf to root)
+        for i in 0..path.len() {
+            let bit = path[i];
             let sibling = self.siblings[i];
             println!("Step {}: bit={}, sibling={:?}", i, bit, sibling);
-            
+
             // Compute the parent hash
             let mut hasher = Sha256::new();
             if bit {
-                // If bit is 1, current_hash is the right child
+                // bit==true means our leaf was the right child,
+                // so sibling is the left child:
                 println!("  Hashing: sibling + current_hash");
                 hasher.update(sibling);
                 hasher.update(current_hash);
             } else {
-                // If bit is 0, current_hash is the left child
+                // bit==false means we were the left child:
                 println!("  Hashing: current_hash + sibling");
                 hasher.update(current_hash);
                 hasher.update(sibling);
             }
-            
+
             let result = hasher.finalize();
             current_hash.copy_from_slice(&result);
             println!("  New hash: {:?}", current_hash);
@@ -125,6 +159,7 @@ impl Proof {
         println!("Final computed root: {:?}", current_hash);
         current_hash
     }
+
 }
 
 /// Converts an address to a path in the Sparse Merkle Tree.
